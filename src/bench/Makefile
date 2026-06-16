@@ -55,7 +55,7 @@ COMMON_OBJS := \
 
 EXTRA_LIBS := $(BLAKE3_DIR)/libblake3.a $(HARAKA_DIR)/libharaka.a $(XKCP_LIB)
 
-all: full_bench
+all: full_bench liboqs_bench
 
 pqc_%_kem.o: $(ROOT)/pqc_%_kem.c
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -69,7 +69,13 @@ full_bench: $(REPO)/src/bench/full_bench.c $(ADAPTER_OBJS)
 	  $(COMMON_OBJS) $(EXTRA_LIBS) \
 	  $(OQS_STATIC) -lcrypto -lm
 
+liboqs_bench: $(REPO)/src/bench/liboqs_bench.c
+	$(CC) $(CFLAGS) -o $@ $< \
+	  $(OQS_STATIC) -lcrypto -lm
+
 clean:
-	rm -f full_bench $(ADAPTER_OBJS) full_benchmark_results.csv
+	rm -f full_bench liboqs_bench $(ADAPTER_OBJS) \
+	      custom_benchmark.csv library_default_benchmark.csv \
+	      full_benchmark_results.csv
 
 .PHONY: all clean

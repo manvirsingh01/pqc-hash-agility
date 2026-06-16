@@ -31,7 +31,8 @@ bash setup.sh
 bash bench.sh
 
 # 4. View results
-cat pqc_benchmark_results.csv
+cat custom_benchmark.csv          # our 6 backends × 6 algorithms
+cat library_default_benchmark.csv # all liboqs built-in KEM + SIG algorithms
 ```
 
 ---
@@ -117,23 +118,35 @@ pqc-hash-agility/
 
 ## What bench.sh Does
 
-Runs all six backends **sequentially** in this order:
+Produces **two separate CSV files** in one run:
+
+### CSV 1 — `custom_benchmark.csv`
+
+Runs all six custom backends sequentially:
 
 ```
-bench_shake        # FIPS baseline — creates pqc_benchmark_results.csv
-bench_turboshake   # appends with --csv-append
+bench_shake        # FIPS baseline
+bench_turboshake   # appends
 bench_k12
 bench_blake3
 bench_xoodyak
 bench_haraka       # AES-NI (x86_64) or NEON (aarch64)
 ```
 
+109 rows: 18 per backend × 6 backends + header.
+
+### CSV 2 — `library_default_benchmark.csv`
+
+Iterates **every KEM and SIG algorithm** enabled in the liboqs build via the enumeration API (`OQS_KEM_alg_count()`, `OQS_SIG_alg_count()`). No hardcoded names — picks up all algorithms automatically.
+
 Options:
 ```
---iters   N       iterations per operation (default 1000)
+--iters   N       custom benchmark iterations per operation (default 1000)
+--liters  N       default benchmark iterations per operation (default 200)
 --warmup  N       warmup iterations before timing (default 100)
---no-haraka       skip Haraka (if AES-NI not supported)
---csv     PATH    output file (default pqc_benchmark_results.csv)
+--no-haraka       skip Haraka backend
+--custom-only     produce custom_benchmark.csv only
+--default-only    produce library_default_benchmark.csv only
 ```
 
 ---
@@ -159,24 +172,36 @@ Options:
 
 ## CSV Output Format
 
-`pqc_benchmark_results.csv` has 35 columns per row (109 rows total: 18 per backend × 6 backends + header):
+### `custom_benchmark.csv`
 
-```
-algorithm, operation, hash_backend, keccak_rounds, fips_compliant,
-median_cycles, cpb, wall_ns_mean, wall_ns_median, wall_ns_min, wall_ns_max,
-wall_ns_stddev, wall_ns_p95, wall_ns_p99, ops_per_sec,
-pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes,
-nist_level, stack_bytes, rss_kb, heap_bytes,
-energy_proxy_nj, edp_cycle_ns,
-iters, warmup, arch, compiler, cpu_model, timestamp
-```
+109 rows (18 per backend × 6 backends + header). Key columns:
 
-Key columns:
-- `hash_backend` — which of the 6 backends
-- `fips_compliant` — `yes` (shake only) or `no`
-- `wall_ns_median` — median operation time in nanoseconds (primary metric)
-- `cpb` — cycles per byte of output
-- `nist_level` — NIST security category (1/3/5)
+| Column | Description |
+|---|---|
+| `hash_backend` | Which of the 6 backends |
+| `algorithm` | ML-KEM-512/768/1024 or ML-DSA-44/65/87 |
+| `operation` | keygen / encaps / decaps / sign / verify |
+| `fips_compliant` | `yes` (shake only) or `no` |
+| `wall_ns_median` | Median operation latency in nanoseconds |
+| `ops_per_sec` | Operations per second |
+| `nist_level` | NIST security category (1/3/5) |
+
+### `library_default_benchmark.csv`
+
+Covers every enabled KEM and SIG in the liboqs build (41 KEMs + ~30 SIGs on a full build). Columns:
+
+| Column | Description |
+|---|---|
+| `library` | `liboqs-<version>` |
+| `algorithm` | Full liboqs algorithm name |
+| `type` | `KEM` or `SIG` |
+| `operation` | keygen / encaps / decaps / sign / verify |
+| `correctness` | `PASS` or `FAIL` |
+| `mean_ns`, `median_ns`, `min_ns`, `max_ns` | Timing statistics |
+| `stddev_ns`, `p95_ns`, `p99_ns` | Dispersion statistics |
+| `ops_per_sec` | Operations per second |
+| `pk_bytes`, `sk_bytes`, `ct_or_sig_bytes`, `ss_bytes` | Key/ciphertext sizes |
+| `nist_level` | NIST security category (1/3/5) |
 
 ---
 
@@ -242,7 +267,7 @@ and reports detailed timing stats (mean, median, min, max, stddev, ops/sec).
 
 ## Reference Results (aarch64, ARM Kali Linux)
 
-See `results/reference_aarch64.csv` for the complete reference run.
+See `results/reference_aarch64.csv` for the complete custom benchmark reference run.
 
 Quick comparison (median keygen latency, µs):
 
