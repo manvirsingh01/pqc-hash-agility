@@ -1,0 +1,30 @@
+# Build artifacts
+*.o
+*.a
+*.so
+*.so.*
+
+# Benchmark binaries
+bench_shake
+bench_turboshake
+bench_k12
+bench_blake3
+bench_xoodyak
+bench_haraka
+full_bench
+
+# Upstream repos (cloned by setup.sh)
+PQClean/
+XKCP/
+liboqs/
+
+# Generated benchmark output
+pqc_benchmark_results.csv
+full_benchmark_results.csv
+liboqs_test_*.log
+liboqs_speed*.log
+liboqs_speed_summary.txt
+*.bak
+
+# Build logs
+build.log
