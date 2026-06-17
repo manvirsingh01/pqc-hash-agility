@@ -287,30 +287,37 @@ int main(int argc, char **argv) {
 
     printf("=== liboqs Default Library Benchmark ===\n");
     printf("Library   : %s\n", lib);
+    printf("Algorithms: ML-KEM-512/768/1024 and ML-DSA-44/65/87 (same as custom benchmark)\n");
     printf("Iterations: %d   Warmup: %d   CSV: %s\n\n", iters, warmup, csv_path);
 
-    /* ── KEM algorithms (all enabled in this build) ─────────────────── */
-    int n_kem = OQS_KEM_alg_count();
-    printf("--- KEM algorithms (%d total) ---\n", n_kem);
-    for (int i = 0; i < n_kem; i++) {
-        const char *name = OQS_KEM_alg_identifier((size_t)i);
-        if (!OQS_KEM_alg_is_enabled(name)) {
-            printf("  %-40s  [disabled]\n", name);
+    /* ── KEM: only the 3 ML-KEM variants we implemented ────────────── */
+    static const char *kem_algs[] = {
+        OQS_KEM_alg_ml_kem_512,
+        OQS_KEM_alg_ml_kem_768,
+        OQS_KEM_alg_ml_kem_1024,
+    };
+    printf("--- KEM algorithms (3) ---\n");
+    for (size_t i = 0; i < sizeof(kem_algs)/sizeof(kem_algs[0]); i++) {
+        if (!OQS_KEM_alg_is_enabled(kem_algs[i])) {
+            printf("  %-40s  [disabled in this build]\n", kem_algs[i]);
             continue;
         }
-        bench_kem(name, lib, iters, warmup);
+        bench_kem(kem_algs[i], lib, iters, warmup);
     }
 
-    /* ── SIG algorithms (all enabled in this build) ──────────────────── */
-    int n_sig = OQS_SIG_alg_count();
-    printf("\n--- SIG algorithms (%d total) ---\n", n_sig);
-    for (int i = 0; i < n_sig; i++) {
-        const char *name = OQS_SIG_alg_identifier((size_t)i);
-        if (!OQS_SIG_alg_is_enabled(name)) {
-            printf("  %-40s  [disabled]\n", name);
+    /* ── SIG: only the 3 ML-DSA variants we implemented ────────────── */
+    static const char *sig_algs[] = {
+        OQS_SIG_alg_ml_dsa_44,
+        OQS_SIG_alg_ml_dsa_65,
+        OQS_SIG_alg_ml_dsa_87,
+    };
+    printf("\n--- SIG algorithms (3) ---\n");
+    for (size_t i = 0; i < sizeof(sig_algs)/sizeof(sig_algs[0]); i++) {
+        if (!OQS_SIG_alg_is_enabled(sig_algs[i])) {
+            printf("  %-40s  [disabled in this build]\n", sig_algs[i]);
             continue;
         }
-        bench_sig(name, lib, iters, warmup);
+        bench_sig(sig_algs[i], lib, iters, warmup);
     }
 
     fclose(g_csv);
