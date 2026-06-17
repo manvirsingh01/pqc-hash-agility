@@ -1,15 +1,15 @@
 /*
- * liboqs_bench.c — Default library benchmark
+ * liboqs_bench.c — Benchmark all 6 custom backends via the OQS_KEM/OQS_SIG API
  *
- * Iterates over every KEM and SIG algorithm built into liboqs, runs a
- * correctness check (keygen→encaps→decaps, keygen→sign→verify), then
- * times each operation with clock_gettime(CLOCK_MONOTONIC).
+ * Tests ML-KEM-512/768/1024 and ML-DSA-44/65/87 for each of the six hash
+ * backends (shake, turboshake, k12, blake3, xoodyak, haraka) using the
+ * same liboqs OQS_KEM / OQS_SIG adapter interface used by the library itself.
  *
  * Output: library_default_benchmark.csv
  *
  * Usage: ./liboqs_bench [--iters N] [--warmup N] [--csv PATH]
  *
- * Build: see src/bench/Makefile
+ * Build: see src/bench/Makefile  (links all custom static libs + liboqs.a)
  */
 
 #include <stdio.h>
@@ -21,6 +21,18 @@
 #include <time.h>
 
 #include <oqs/oqs.h>
+
+/* adapter headers for our 5 custom backends (shake uses OQS_KEM_new directly) */
+#include "pqc_turboshake_kem.h"
+#include "pqc_turboshake_dsa.h"
+#include "pqc_k12_kem.h"
+#include "pqc_k12_dsa.h"
+#include "pqc_blake3_kem.h"
+#include "pqc_blake3_dsa.h"
+#include "pqc_xoodyak_kem.h"
+#include "pqc_xoodyak_dsa.h"
+#include "pqc_haraka_kem.h"
+#include "pqc_haraka_dsa.h"
 
 /* ── timing ─────────────────────────────────────────────────────────── */
 
@@ -65,7 +77,7 @@ static FILE *g_csv;
 
 static void csv_header(void) {
     fprintf(g_csv,
-        "library,algorithm,type,operation,"
+        "backend,algorithm,type,operation,"
         "correctness,iterations,"
         "mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,"
         "ops_per_sec,"
@@ -73,7 +85,7 @@ static void csv_header(void) {
         "nist_level\n");
 }
 
-static void csv_row(const char *lib, const char *algo, const char *type,
+static void csv_row(const char *backend, const char *algo, const char *type,
                     const char *op, const char *correct,
                     Stats st,
                     size_t pk, size_t sk, size_t ct_sig, size_t ss,
@@ -86,7 +98,7 @@ static void csv_row(const char *lib, const char *algo, const char *type,
         "%.2f,"
         "%zu,%zu,%zu,%zu,"
         "%d\n",
-        lib, algo, type, op,
+        backend, algo, type, op,
         correct, st.n,
         st.mean_ns, st.median_ns, st.min_ns, st.max_ns,
         st.stddev_ns, st.p95_ns, st.p99_ns,
@@ -98,11 +110,11 @@ static void csv_row(const char *lib, const char *algo, const char *type,
 
 /* ── KEM benchmark ───────────────────────────────────────────────────── */
 
-static void bench_kem(const char *alg_name, const char *lib,
-                      int iters, int warmup) {
-    OQS_KEM *kem = OQS_KEM_new(alg_name);
+static void bench_kem(OQS_KEM *kem, const char *alg_name,
+                      const char *backend, int iters, int warmup) {
     if (!kem) {
-        fprintf(stderr, "  [SKIP] %s (not enabled in this build)\n", alg_name);
+        fprintf(stderr, "  [SKIP] %s/%s (constructor returned NULL)\n",
+                backend, alg_name);
         return;
     }
 
@@ -114,7 +126,7 @@ static void bench_kem(const char *alg_name, const char *lib,
     uint64_t *ts = OQS_MEM_malloc(sizeof(uint64_t) * (size_t)iters);
 
     if (!pk || !sk || !ct || !ss1 || !ss2 || !ts) {
-        fprintf(stderr, "  malloc failed for %s\n", alg_name);
+        fprintf(stderr, "  malloc failed for %s/%s\n", backend, alg_name);
         goto cleanup;
     }
 
@@ -125,7 +137,7 @@ static void bench_kem(const char *alg_name, const char *lib,
         OQS_KEM_decaps(kem, ss2, ct, sk) == OQS_SUCCESS &&
         memcmp(ss1, ss2, kem->length_shared_secret) == 0)
         correct = "PASS";
-    printf("  %-40s  %s\n", alg_name, correct);
+    printf("  %-12s  %-20s  %s\n", backend, alg_name, correct);
 
     size_t pk_b = kem->length_public_key,   sk_b = kem->length_secret_key;
     size_t ct_b = kem->length_ciphertext,   ss_b = kem->length_shared_secret;
@@ -144,7 +156,7 @@ static void bench_kem(const char *alg_name, const char *lib,
         OQS_KEM_keypair(kem, pk, sk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "KEM", "keygen", correct,
+    csv_row(backend, alg_name, "KEM", "keygen", correct,
             compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
     /* encaps */
@@ -154,7 +166,7 @@ static void bench_kem(const char *alg_name, const char *lib,
         OQS_KEM_encaps(kem, ct, ss1, pk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "KEM", "encaps", correct,
+    csv_row(backend, alg_name, "KEM", "encaps", correct,
             compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
     /* decaps */
@@ -164,7 +176,7 @@ static void bench_kem(const char *alg_name, const char *lib,
         OQS_KEM_decaps(kem, ss2, ct, sk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "KEM", "decaps", correct,
+    csv_row(backend, alg_name, "KEM", "decaps", correct,
             compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
 cleanup:
@@ -181,11 +193,11 @@ cleanup:
 
 #define MSG_LEN 32
 
-static void bench_sig(const char *alg_name, const char *lib,
-                      int iters, int warmup) {
-    OQS_SIG *sig = OQS_SIG_new(alg_name);
+static void bench_sig(OQS_SIG *sig, const char *alg_name,
+                      const char *backend, int iters, int warmup) {
     if (!sig) {
-        fprintf(stderr, "  [SKIP] %s (not enabled in this build)\n", alg_name);
+        fprintf(stderr, "  [SKIP] %s/%s (constructor returned NULL)\n",
+                backend, alg_name);
         return;
     }
 
@@ -197,18 +209,18 @@ static void bench_sig(const char *alg_name, const char *lib,
     size_t   siglen = 0;
 
     if (!pk || !sk || !sigbuf || !ts) {
-        fprintf(stderr, "  malloc failed for %s\n", alg_name);
+        fprintf(stderr, "  malloc failed for %s/%s\n", backend, alg_name);
         goto cleanup;
     }
     OQS_randombytes(msg, MSG_LEN);
 
     /* correctness check */
     const char *correct = "FAIL";
-    if (OQS_SIG_keypair(sig, pk, sk)                              == OQS_SUCCESS &&
-        OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk)      == OQS_SUCCESS &&
-        OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk)      == OQS_SUCCESS)
+    if (OQS_SIG_keypair(sig, pk, sk)                             == OQS_SUCCESS &&
+        OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk)     == OQS_SUCCESS &&
+        OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk)    == OQS_SUCCESS)
         correct = "PASS";
-    printf("  %-40s  %s\n", alg_name, correct);
+    printf("  %-12s  %-20s  %s\n", backend, alg_name, correct);
 
     size_t pk_b = sig->length_public_key,   sk_b = sig->length_secret_key;
     size_t sg_b = sig->length_signature;
@@ -227,7 +239,7 @@ static void bench_sig(const char *alg_name, const char *lib,
         OQS_SIG_keypair(sig, pk, sk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "SIG", "keygen", correct,
+    csv_row(backend, alg_name, "SIG", "keygen", correct,
             compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
     /* sign */
@@ -237,7 +249,7 @@ static void bench_sig(const char *alg_name, const char *lib,
         OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "SIG", "sign", correct,
+    csv_row(backend, alg_name, "SIG", "sign", correct,
             compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
     /* verify */
@@ -247,7 +259,7 @@ static void bench_sig(const char *alg_name, const char *lib,
         OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk);
         ts[i] = now_ns() - t;
     }
-    csv_row(lib, alg_name, "SIG", "verify", correct,
+    csv_row(backend, alg_name, "SIG", "verify", correct,
             compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
 cleanup:
@@ -258,11 +270,55 @@ cleanup:
     OQS_SIG_free(sig);
 }
 
+/* ── backend tables ──────────────────────────────────────────────────── */
+
+typedef OQS_KEM *(*kem_ctor)(void);
+typedef OQS_SIG *(*sig_ctor)(void);
+
+typedef struct {
+    const char *name;
+    kem_ctor    kem[3];   /* 512, 768, 1024 */
+    sig_ctor    sig[3];   /* 44,  65,  87   */
+} Backend;
+
+/* shake uses liboqs OQS_KEM_new / OQS_SIG_new — wrap with thin helpers */
+static OQS_KEM *shake_kem_512_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_512);  }
+static OQS_KEM *shake_kem_768_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_768);  }
+static OQS_KEM *shake_kem_1024_new(void) { return OQS_KEM_new(OQS_KEM_alg_ml_kem_1024); }
+static OQS_SIG *shake_sig_44_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);   }
+static OQS_SIG *shake_sig_65_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_65);   }
+static OQS_SIG *shake_sig_87_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_87);   }
+
+static const Backend backends[] = {
+    { "shake",
+      { shake_kem_512_new,                   shake_kem_768_new,                   shake_kem_1024_new                   },
+      { shake_sig_44_new,                    shake_sig_65_new,                    shake_sig_87_new                     } },
+    { "turboshake",
+      { OQS_KEM_ml_kem_512_turboshake_new,   OQS_KEM_ml_kem_768_turboshake_new,   OQS_KEM_ml_kem_1024_turboshake_new   },
+      { OQS_SIG_ml_dsa_44_turboshake_new,    OQS_SIG_ml_dsa_65_turboshake_new,    OQS_SIG_ml_dsa_87_turboshake_new     } },
+    { "k12",
+      { OQS_KEM_ml_kem_512_k12_new,          OQS_KEM_ml_kem_768_k12_new,          OQS_KEM_ml_kem_1024_k12_new          },
+      { OQS_SIG_ml_dsa_44_k12_new,           OQS_SIG_ml_dsa_65_k12_new,           OQS_SIG_ml_dsa_87_k12_new            } },
+    { "blake3",
+      { OQS_KEM_ml_kem_512_blake3_new,       OQS_KEM_ml_kem_768_blake3_new,       OQS_KEM_ml_kem_1024_blake3_new       },
+      { OQS_SIG_ml_dsa_44_blake3_new,        OQS_SIG_ml_dsa_65_blake3_new,        OQS_SIG_ml_dsa_87_blake3_new         } },
+    { "xoodyak",
+      { OQS_KEM_ml_kem_512_xoodyak_new,      OQS_KEM_ml_kem_768_xoodyak_new,      OQS_KEM_ml_kem_1024_xoodyak_new      },
+      { OQS_SIG_ml_dsa_44_xoodyak_new,       OQS_SIG_ml_dsa_65_xoodyak_new,       OQS_SIG_ml_dsa_87_xoodyak_new        } },
+    { "haraka",
+      { OQS_KEM_ml_kem_512_haraka_new,       OQS_KEM_ml_kem_768_haraka_new,       OQS_KEM_ml_kem_1024_haraka_new       },
+      { OQS_SIG_ml_dsa_44_haraka_new,        OQS_SIG_ml_dsa_65_haraka_new,        OQS_SIG_ml_dsa_87_haraka_new         } },
+};
+#define N_BACKENDS (int)(sizeof(backends)/sizeof(backends[0]))
+
+static const char *kem_algs[] = { "ML-KEM-512", "ML-KEM-768", "ML-KEM-1024" };
+static const char *sig_algs[] = { "ML-DSA-44",  "ML-DSA-65",  "ML-DSA-87"  };
+
 /* ── main ────────────────────────────────────────────────────────────── */
 
 int main(int argc, char **argv) {
-    int         iters    = 200;
-    int         warmup   = 20;
+    int         iters    = 1000;
+    int         warmup   = 100;
     const char *csv_path = "library_default_benchmark.csv";
 
     for (int i = 1; i < argc; i++) {
@@ -277,52 +333,34 @@ int main(int argc, char **argv) {
 
     OQS_init();
 
-    /* build lib version string */
-    char lib[64];
-    snprintf(lib, sizeof(lib), "liboqs-%s", OQS_VERSION_TEXT);
-
     g_csv = fopen(csv_path, "w");
     if (!g_csv) { perror(csv_path); return 1; }
     csv_header();
 
-    printf("=== liboqs Default Library Benchmark ===\n");
-    printf("Library   : %s\n", lib);
-    printf("Algorithms: ML-KEM-512/768/1024 and ML-DSA-44/65/87 (same as custom benchmark)\n");
+    printf("=== Default Library Benchmark — All 6 Backends via OQS API ===\n");
+    printf("Backends  : shake, turboshake, k12, blake3, xoodyak, haraka\n");
+    printf("Algorithms: ML-KEM-512/768/1024  +  ML-DSA-44/65/87\n");
     printf("Iterations: %d   Warmup: %d   CSV: %s\n\n", iters, warmup, csv_path);
 
-    /* ── KEM: only the 3 ML-KEM variants we implemented ────────────── */
-    static const char *kem_algs[] = {
-        OQS_KEM_alg_ml_kem_512,
-        OQS_KEM_alg_ml_kem_768,
-        OQS_KEM_alg_ml_kem_1024,
-    };
-    printf("--- KEM algorithms (3) ---\n");
-    for (size_t i = 0; i < sizeof(kem_algs)/sizeof(kem_algs[0]); i++) {
-        if (!OQS_KEM_alg_is_enabled(kem_algs[i])) {
-            printf("  %-40s  [disabled in this build]\n", kem_algs[i]);
-            continue;
-        }
-        bench_kem(kem_algs[i], lib, iters, warmup);
-    }
+    for (int b = 0; b < N_BACKENDS; b++) {
+        const Backend *bk = &backends[b];
 
-    /* ── SIG: only the 3 ML-DSA variants we implemented ────────────── */
-    static const char *sig_algs[] = {
-        OQS_SIG_alg_ml_dsa_44,
-        OQS_SIG_alg_ml_dsa_65,
-        OQS_SIG_alg_ml_dsa_87,
-    };
-    printf("\n--- SIG algorithms (3) ---\n");
-    for (size_t i = 0; i < sizeof(sig_algs)/sizeof(sig_algs[0]); i++) {
-        if (!OQS_SIG_alg_is_enabled(sig_algs[i])) {
-            printf("  %-40s  [disabled in this build]\n", sig_algs[i]);
-            continue;
-        }
-        bench_sig(sig_algs[i], lib, iters, warmup);
+        printf("━━━ [%d/6] %s ━━━\n", b+1, bk->name);
+
+        printf("  KEM:\n");
+        for (int k = 0; k < 3; k++)
+            bench_kem(bk->kem[k](), kem_algs[k], bk->name, iters, warmup);
+
+        printf("  SIG:\n");
+        for (int s = 0; s < 3; s++)
+            bench_sig(bk->sig[s](), sig_algs[s], bk->name, iters, warmup);
+
+        printf("\n");
     }
 
     fclose(g_csv);
     OQS_destroy();
 
-    printf("\n=== Done. Results: %s ===\n", csv_path);
+    printf("=== Done. Results: %s ===\n", csv_path);
     return 0;
 }

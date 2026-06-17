@@ -69,8 +69,10 @@ full_bench: $(REPO)/src/bench/full_bench.c $(ADAPTER_OBJS)
 	  $(COMMON_OBJS) $(EXTRA_LIBS) \
 	  $(OQS_STATIC) -lcrypto -lm
 
-liboqs_bench: $(REPO)/src/bench/liboqs_bench.c
+liboqs_bench: $(REPO)/src/bench/liboqs_bench.c $(ADAPTER_OBJS)
 	$(CC) $(CFLAGS) -o $@ $< \
+	  $(ADAPTER_OBJS) $(KEM_LIBS) $(DSA_LIBS) \
+	  $(COMMON_OBJS) $(EXTRA_LIBS) \
 	  $(OQS_STATIC) -lcrypto -lm
 
 clean:
