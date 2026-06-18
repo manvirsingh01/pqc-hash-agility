@@ -21,18 +21,22 @@ Benchmarks **ML-KEM** (FIPS 203) and **ML-DSA** (FIPS 204) across six hash backe
 
 ```bash
 # 1. Clone the repo
-git clone https://github.com/<your-username>/pqc-hash-agility.git
+git clone https://github.com/manvirsingh01/pqc-hash-agility.git
 cd pqc-hash-agility
 
 # 2. Build everything (takes ~15–25 min; clones PQClean, XKCP, liboqs)
 bash setup.sh
 
-# 3. Run unbiased benchmarks (takes ~10–20 min)
+# 3. Run benchmarks — produces TWO CSV files + system_info.txt
 bash bench.sh
 
 # 4. View results
-cat custom_benchmark.csv          # our 6 backends × 6 algorithms
-cat library_default_benchmark.csv # all liboqs built-in KEM + SIG algorithms
+cat custom_benchmark.csv          # our 6 backends x 6 algorithms
+cat library_default_benchmark.csv # same 6 algorithms via OQS API, all 6 backends
+cat system_info.txt               # CPU cores, threads, frequency, ISA features
+
+# 5. (Optional) Run variable k-value KEM benchmark
+bash kem_k_bench.sh               # interactive: choose backend + k=1..8
 ```
 
 ---
@@ -57,9 +61,11 @@ ninja-build  rsync  xsltproc  git
 ```
 pqc-hash-agility/
 ├── setup.sh                  # one-shot: clone, patch, build everything
-├── bench.sh                  # run all backends → pqc_benchmark_results.csv
+├── bench.sh                  # run all backends -> two CSV files
+├── kem_k_bench.sh            # interactive variable-k ML-KEM benchmark
+├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
-│   ├── pqc_bench.c           # benchmark harness (compiled 6× with -DUSE_<TAG>)
+│   ├── pqc_bench.c           # benchmark harness (compiled 6x with -DUSE_<TAG>)
 │   ├── adapters/             # OQS_KEM / OQS_SIG wrapper shims (10 adapter pairs)
 │   │   ├── pqc_turboshake_kem.{c,h}
 │   │   ├── pqc_turboshake_dsa.{c,h}
@@ -76,6 +82,7 @@ pqc-hash-agility/
 │   │   └── Haraka/           # haraka.c (aarch64 NEON) + haraka_x86.c (AES-NI)
 │   └── bench/
 │       ├── full_bench.c      # single binary: all backends, correctness + timing
+│       ├── liboqs_bench.c    # all 6 backends via OQS adapter API
 │       └── Makefile
 ├── PQClean_custom/           # forked ML-KEM/ML-DSA backend implementations
 │   ├── crypto_kem/
@@ -116,13 +123,15 @@ pqc-hash-agility/
 
 ---
 
-## What bench.sh Does
+## Benchmark Scripts
 
-Produces **two separate CSV files** in one run:
+### bench.sh — Main Benchmark (Two CSV Files)
 
-### CSV 1 — `custom_benchmark.csv`
+Produces **two separate CSV files** in one run, plus a `system_info.txt` with full hardware details.
 
-Runs all six custom backends sequentially:
+#### CSV 1 — `custom_benchmark.csv`
+
+Runs all six custom backends sequentially using the per-backend binaries:
 
 ```
 bench_shake        # FIPS baseline
@@ -133,21 +142,89 @@ bench_xoodyak
 bench_haraka       # AES-NI (x86_64) or NEON (aarch64)
 ```
 
-109 rows: 18 per backend × 6 backends + header.
+108 rows: 6 backends x 6 algorithms x 3 operations (keygen/encaps/decaps or keygen/sign/verify).
 
-### CSV 2 — `library_default_benchmark.csv`
+#### CSV 2 — `library_default_benchmark.csv`
 
-Iterates **every KEM and SIG algorithm** enabled in the liboqs build via the enumeration API (`OQS_KEM_alg_count()`, `OQS_SIG_alg_count()`). No hardcoded names — picks up all algorithms automatically.
+Tests the same **6 backends x 6 algorithms** (ML-KEM-512/768/1024 + ML-DSA-44/65/87) through the liboqs `OQS_KEM` / `OQS_SIG` adapter API. Uses our custom adapter constructors for each backend.
 
-Options:
+108 rows with the same structure, allowing direct column-for-column comparison with `custom_benchmark.csv`.
+
+#### Options
+
 ```
 --iters   N       custom benchmark iterations per operation (default 1000)
 --liters  N       default benchmark iterations per operation (default 200)
---warmup  N       warmup iterations before timing (default 100)
+--warmup  N       warmup iterations before timing            (default 100)
 --no-haraka       skip Haraka backend
 --custom-only     produce custom_benchmark.csv only
 --default-only    produce library_default_benchmark.csv only
 ```
+
+---
+
+### kem_k_bench.sh — Variable k-Value ML-KEM Benchmark
+
+Interactive script to benchmark ML-KEM with **non-standard module ranks** (k=1 through k=8).
+
+Standard ML-KEM uses k=2 (ML-KEM-512), k=3 (ML-KEM-768), k=4 (ML-KEM-1024). This script lets you go beyond that range for research purposes.
+
+```bash
+bash kem_k_bench.sh
+bash kem_k_bench.sh --iters 500 --warmup 50
+```
+
+#### How it works
+
+1. Interactive menu to select backend (shake/turboshake/k12/blake3/xoodyak/haraka or ALL)
+2. Enter k values (space-separated, e.g. `1 2 3 4 5 6 7 8`)
+3. For each combination, the script:
+   - Copies ML-KEM source from the closest standard variant
+   - Patches `params.h` with the requested k value and derived parameters
+   - Patches `api.h` with computed key/ciphertext sizes
+   - Recompiles and links the variant
+   - Runs correctness check (keygen -> encaps -> decaps -> memcmp)
+   - Times keygen, encaps, decaps
+4. Results appended to `kem_k_benchmark.csv`
+
+#### k-value parameter table
+
+| k | ETA1 | ETA2 | du | dv | pk bytes | sk bytes | ct bytes |
+|---|---|---|---|---|---|---|---|
+| 1 | 3 | 2 | 10 | 4 | 416 | 864 | 448 |
+| 2 | 3 | 2 | 10 | 4 | 800 | 1632 | 768 |
+| 3 | 2 | 2 | 10 | 4 | 1184 | 2400 | 1088 |
+| 4 | 2 | 2 | 11 | 5 | 1568 | 3168 | 1568 |
+| 5 | 2 | 2 | 11 | 5 | 1952 | 3936 | 1920 |
+| 6 | 2 | 2 | 11 | 5 | 2336 | 4704 | 2272 |
+| 7 | 2 | 2 | 11 | 5 | 2720 | 5472 | 2624 |
+| 8 | 2 | 2 | 11 | 5 | 3104 | 6240 | 2976 |
+
+#### CSV columns (`kem_k_benchmark.csv`)
+
+```
+backend, k_value, algorithm, type, operation,
+correctness, iterations,
+mean_ns, median_ns, min_ns, max_ns,
+stddev_ns, p95_ns, p99_ns, ops_per_sec,
+pk_bytes, sk_bytes, ct_bytes, ss_bytes,
+eta1, eta2, du_bits, dv_bits
+```
+
+---
+
+### system_info.sh — Hardware Information
+
+Generated automatically by `bench.sh` and `kem_k_bench.sh`. Produces `system_info.txt` with:
+
+| Section | Details |
+|---|---|
+| CPU | Model, architecture, physical cores, logical CPUs, threads/core, hyperthreading |
+| Frequency | Current/min/max MHz, CPU governor |
+| ISA Features | AES-NI, AVX2, AVX-512, SSE4.1, SHA-NI, NEON |
+| Memory | Total RAM, available RAM |
+| OS/Kernel | Kernel version, OS name, compiler version |
+| Threading | Confirms single-threaded sequential execution, no CPU pinning |
 
 ---
 
@@ -162,6 +239,7 @@ Options:
 | **Median reported** | Median latency is reported (robust to OS scheduling outliers) |
 | **Static linking** | Binaries statically link `liboqs.a` — no shared-lib lookup overhead |
 | **Same compiler flags** | All backends compiled with `-O3 -march=native` |
+| **System info captured** | `system_info.txt` records CPU model, cores, frequency, governor, ISA features alongside every benchmark run |
 
 > **Note on CPU frequency:** For the most stable numbers, pin your CPU governor before running:
 > ```bash
@@ -174,7 +252,7 @@ Options:
 
 ### `custom_benchmark.csv`
 
-109 rows (18 per backend × 6 backends + header). Key columns:
+108 rows (6 backends x 6 algorithms x 3 operations). Key columns:
 
 | Column | Description |
 |---|---|
@@ -188,12 +266,12 @@ Options:
 
 ### `library_default_benchmark.csv`
 
-Covers every enabled KEM and SIG in the liboqs build (41 KEMs + ~30 SIGs on a full build). Columns:
+108 rows (same structure). Tests all 6 backends through OQS adapter API. Columns:
 
 | Column | Description |
 |---|---|
-| `library` | `liboqs-<version>` |
-| `algorithm` | Full liboqs algorithm name |
+| `backend` | shake / turboshake / k12 / blake3 / xoodyak / haraka |
+| `algorithm` | ML-KEM-512/768/1024 or ML-DSA-44/65/87 |
 | `type` | `KEM` or `SIG` |
 | `operation` | keygen / encaps / decaps / sign / verify |
 | `correctness` | `PASS` or `FAIL` |
@@ -202,6 +280,10 @@ Covers every enabled KEM and SIG in the liboqs build (41 KEMs + ~30 SIGs on a fu
 | `ops_per_sec` | Operations per second |
 | `pk_bytes`, `sk_bytes`, `ct_or_sig_bytes`, `ss_bytes` | Key/ciphertext sizes |
 | `nist_level` | NIST security category (1/3/5) |
+
+### `kem_k_benchmark.csv`
+
+Variable number of rows depending on chosen k values and backends. See [kem_k_bench.sh](#kem_k_benchsh--variable-k-value-ml-kem-benchmark) for column details.
 
 ---
 
@@ -242,8 +324,17 @@ OQS_SIG *OQS_SIG_ml_dsa_44_blake3_new(void);
 ```bash
 gcc -DUSE_TURBOSHAKE  ... -o bench_turboshake
 gcc -DUSE_K12         ... -o bench_k12
-# etc. (no -DUSE_* → bench_shake uses liboqs OQS_KEM_new)
+# etc. (no -DUSE_* -> bench_shake uses liboqs OQS_KEM_new)
 ```
+
+### liboqs_bench — All backends via OQS API
+
+`liboqs_bench.c` uses a function pointer table to test all 6 backends:
+- `shake` — calls `OQS_KEM_new()` / `OQS_SIG_new()` (liboqs default)
+- `turboshake` — calls `OQS_KEM_ml_kem_512_turboshake_new()` etc.
+- `k12` / `blake3` / `xoodyak` / `haraka` — same pattern via adapter constructors
+
+Each backend x algorithm combination goes through the same `OQS_KEM_keypair()` / `OQS_KEM_encaps()` / `OQS_KEM_decaps()` API with correctness verification before timing.
 
 ---
 
@@ -259,8 +350,8 @@ make -f pqc-hash-agility/src/bench/Makefile
 ./full_bench --iters 500 --warmup 20 --csv full_benchmark_results.csv
 ```
 
-This runs all 36 variants (6 backends × 6 algorithms) in one pass,
-tests keygen→encaps→decaps and keygen→sign→verify correctness (PASS/FAIL),
+This runs all 36 variants (6 backends x 6 algorithms) in one pass,
+tests keygen->encaps->decaps and keygen->sign->verify correctness (PASS/FAIL),
 and reports detailed timing stats (mean, median, min, max, stddev, ops/sec).
 
 ---
@@ -269,22 +360,34 @@ and reports detailed timing stats (mean, median, min, max, stddev, ops/sec).
 
 See `results/reference_aarch64.csv` for the complete custom benchmark reference run.
 
-Quick comparison (median keygen latency, µs):
+Quick comparison (median keygen latency, us):
 
 | Algorithm | shake | turboshake | k12 | blake3 | xoodyak | haraka |
 |---|---|---|---|---|---|---|
-| ML-KEM-512 | 12 | 16 | 16 | 16 | 31 | **14** |
-| ML-KEM-768 | 22 | 27 | 28 | 28 | 55 | **23** |
-| ML-KEM-1024 | 23 | 41 | 42 | 43 | 89 | **36** |
-| ML-DSA-44 | **34** | 41 | 41 | 41 | 122 | 30 |
-| ML-DSA-65 | **60** | 77 | 78 | 81 | 227 | 58 |
-| ML-DSA-87 | **104** | 106 | 108 | 112 | 365 | 75 |
+| ML-KEM-512 | **11** | 16 | 16 | 16 | 31 | 14 |
+| ML-KEM-768 | **16** | 27 | 29 | 27 | 56 | 24 |
+| ML-KEM-1024 | **22** | 41 | 43 | 43 | 93 | 36 |
+| ML-DSA-44 | 34 | 40 | 40 | 42 | 119 | **31** |
+| ML-DSA-65 | 59 | 76 | 80 | 87 | 224 | **58** |
+| ML-DSA-87 | 102 | 104 | 108 | 113 | 359 | **74** |
+
+Variable-k results (median keygen latency, us, turboshake backend):
+
+| k | pk bytes | ct bytes | keygen | encaps | decaps |
+|---|---|---|---|---|---|
+| 1 | 416 | 448 | 7 | 10 | 13 |
+| 2 | 800 | 768 | 16 | 19 | 23 |
+| 3 | 1184 | 1088 | 27 | 29 | 35 |
+| 4 | 1568 | 1568 | 44 | 45 | 52 |
+| 5 | 1952 | 1920 | 61 | 57 | 66 |
+| 8 | 3104 | 2976 | 129 | 139 | 139 |
 
 **Observations:**
 - `shake` wins on KEM (liboqs has hardware-accelerated Keccak on ARM)
 - `haraka` is fastest on DSA (ARM NEON AES is extremely fast)
 - `xoodyak` is consistently the slowest (Xoodoo has high cycle cost per output byte)
 - `turboshake` and `k12` are close to each other; ~30–40% slower than shake on ARM
+- Keygen scales roughly as O(k^2), encaps/decaps similarly, consistent with lattice matrix multiplication
 
 ---
 
@@ -299,6 +402,7 @@ Quick comparison (median keygen latency, µs):
 | Haraka: `requires AES-NI` | On x86\_64 without AES-NI, run `bench.sh --no-haraka` |
 | Slow liboqs clone | The script uses `--depth=1` for liboqs; still ~100MB on slow networks |
 | `-Werror` from PQClean | PQClean uses `-Werror`; if gcc version differs, ignore (builds succeed) |
+| `kem_k_bench.sh` FAIL for high k | Ensure setup.sh completed; the script recompiles from PQClean sources |
 
 ---
 
