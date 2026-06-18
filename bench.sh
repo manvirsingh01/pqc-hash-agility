@@ -34,17 +34,18 @@ CUSTOM_ONLY=0
 DEFAULT_ONLY=0
 REPO="$(cd "$(dirname "$0")" && pwd)"
 
-for arg in "$@"; do
-  case "$arg" in
-    --iters)        shift; ITERS="$1" ;;
-    --liters)       shift; LITERS="$1" ;;
-    --warmup)       shift; WARMUP="$1" ;;
-    --no-haraka)    NO_HARAKA=1 ;;
-    --custom-only)  CUSTOM_ONLY=1 ;;
-    --default-only) DEFAULT_ONLY=1 ;;
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --iters)        ITERS="$2";  shift 2 ;;
+    --liters)       LITERS="$2"; shift 2 ;;
+    --warmup)       WARMUP="$2"; shift 2 ;;
+    --no-haraka)    NO_HARAKA=1; shift ;;
+    --custom-only)  CUSTOM_ONLY=1; shift ;;
+    --default-only) DEFAULT_ONLY=1; shift ;;
     --help|-h)
       sed -n '2,/^# ====/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
       exit 0 ;;
+    *) shift ;;
   esac
 done
 
@@ -161,7 +162,7 @@ if [ "$CUSTOM_ONLY" = "0" ]; then
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo " CSV 2/2: library_default_benchmark.csv"
-  echo " (ALL liboqs built-in KEM + SIG algorithms, correctness + timing)"
+  echo " (all 6 backends × 6 algorithms via OQS API, correctness + timing)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
 
@@ -198,7 +199,7 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
 fi
 if [ "$CUSTOM_ONLY" = "0" ]; then
   echo " library_default_benchmark.csv"
-  echo "   Columns: library, algorithm, type, operation,"
+  echo "   Columns: backend, algorithm, type, operation,"
   echo "            correctness, iterations,"
   echo "            mean_ns, median_ns, min_ns, max_ns,"
   echo "            stddev_ns, p95_ns, p99_ns, ops_per_sec,"

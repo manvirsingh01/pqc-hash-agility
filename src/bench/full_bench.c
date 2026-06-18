@@ -30,16 +30,16 @@
 
 #include <oqs/oqs.h>
 
-#include "../pqc_turboshake_kem.h"
-#include "../pqc_turboshake_dsa.h"
-#include "../pqc_k12_kem.h"
-#include "../pqc_k12_dsa.h"
-#include "../pqc_blake3_kem.h"
-#include "../pqc_blake3_dsa.h"
-#include "../pqc_xoodyak_kem.h"
-#include "../pqc_xoodyak_dsa.h"
-#include "../pqc_haraka_kem.h"
-#include "../pqc_haraka_dsa.h"
+#include "pqc_turboshake_kem.h"
+#include "pqc_turboshake_dsa.h"
+#include "pqc_k12_kem.h"
+#include "pqc_k12_dsa.h"
+#include "pqc_blake3_kem.h"
+#include "pqc_blake3_dsa.h"
+#include "pqc_xoodyak_kem.h"
+#include "pqc_xoodyak_dsa.h"
+#include "pqc_haraka_kem.h"
+#include "pqc_haraka_dsa.h"
 
 /* ------------------------------------------------------------------ */
 /* Timing                                                               */
