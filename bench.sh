@@ -62,6 +62,10 @@ echo "   library_default_benchmark.csv  — all liboqs built-in algorithms"
 echo "========================================================="
 echo ""
 
+# ── Generate system info ──
+bash "$REPO/system_info.sh" system_info.txt
+echo ""
+
 # ── Optional: pin CPU to performance governor (reduces timing jitter) ──
 if command -v cpupower &>/dev/null 2>&1; then
   if cpupower frequency-set --governor performance &>/dev/null 2>&1; then
