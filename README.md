@@ -37,6 +37,9 @@ cat system_info.txt               # CPU cores, threads, frequency, ISA features
 
 # 5. (Optional) Run variable k-value KEM benchmark
 bash kem_k_bench.sh               # interactive: choose backend + k=1..8
+
+# 6. (Optional) Run hyperparameter benchmark
+bash hyper_bench.sh               # interactive: tweak ML-KEM/ML-DSA params
 ```
 
 ---
@@ -63,6 +66,7 @@ pqc-hash-agility/
 ├── setup.sh                  # one-shot: clone, patch, build everything
 ├── bench.sh                  # run all backends -> two CSV files
 ├── kem_k_bench.sh            # interactive variable-k ML-KEM benchmark
+├── hyper_bench.sh            # interactive hyperparameter benchmark (KEM + DSA)
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
 │   ├── pqc_bench.c           # benchmark harness (compiled 6x with -DUSE_<TAG>)
@@ -213,9 +217,58 @@ eta1, eta2, du_bits, dv_bits
 
 ---
 
+### hyper_bench.sh — Hyperparameter Benchmark (ML-KEM + ML-DSA)
+
+Interactive script to benchmark **ML-KEM** and **ML-DSA** with custom cryptographic hyperparameters. Recompiles PQClean source with patched parameters, runs correctness checks, and produces detailed CSV output.
+
+```bash
+bash hyper_bench.sh
+bash hyper_bench.sh --iters 500 --warmup 50
+```
+
+#### ML-KEM mode
+
+Tweak the **compression profile** and **module rank (k)**:
+
+| Profile | eta1 | du | dv | Source template | Notes |
+|---|---|---|---|---|---|
+| A | 3 | 10 | 4 | ml-kem-512 | Aggressive compression, higher failure probability at large k |
+| B | 2 | 11 | 5 | ml-kem-1024 | Conservative compression, lower failure probability |
+
+k values: 1-8 (standard: 2/3/4; research: 1/5-8).
+
+This lets you explore combinations that `kem_k_bench.sh` doesn't cover — e.g., k=5 with profile A (du=10/dv=4) vs. profile B (du=11/dv=5).
+
+Output: `kem_hyper_benchmark.csv` with columns: `backend, algorithm, profile, k, eta1, eta2, du, dv, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_bytes, ss_bytes`
+
+#### ML-DSA mode
+
+Choose a **code base** (determines eta, gamma1, gamma2, packing code) then freely adjust **K, L, tau, omega**:
+
+| Base | eta | gamma1 | gamma2 | ctildebytes | Source template |
+|---|---|---|---|---|---|
+| 44-base | 2 | 2^17 | (Q-1)/88 | 32 | ml-dsa-44 |
+| 65-base | 4 | 2^19 | (Q-1)/32 | 48 | ml-dsa-65 |
+| 87-base | 2 | 2^19 | (Q-1)/32 | 64 | ml-dsa-87 |
+
+Tweakable parameters:
+
+| Parameter | Range | Standard values | Effect |
+|---|---|---|---|
+| K (matrix rows) | 1-12 | 4 / 6 / 8 | Security level, key size |
+| L (matrix cols) | 1-12 | 4 / 5 / 7 | Security level, signature size |
+| tau (challenge weight) | 1-64 | 39 / 49 / 60 | Signing rejection rate |
+| omega (hint budget) | 1-256 | 80 / 55 / 75 | Verification hint limit |
+
+beta is auto-computed as `tau * eta`. The script validates that `beta < gamma1` (otherwise signing loops forever).
+
+Output: `dsa_hyper_benchmark.csv` with columns: `backend, algorithm, base, K, L, eta, tau, beta, gamma1_bits, gamma2_div, omega, ctildebytes, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, sig_bytes`
+
+---
+
 ### system_info.sh — Hardware Information
 
-Generated automatically by `bench.sh` and `kem_k_bench.sh`. Produces `system_info.txt` with:
+Generated automatically by `bench.sh`, `kem_k_bench.sh`, and `hyper_bench.sh`. Produces `system_info.txt` with:
 
 | Section | Details |
 |---|---|
@@ -284,6 +337,10 @@ Generated automatically by `bench.sh` and `kem_k_bench.sh`. Produces `system_inf
 ### `kem_k_benchmark.csv`
 
 Variable number of rows depending on chosen k values and backends. See [kem_k_bench.sh](#kem_k_benchsh--variable-k-value-ml-kem-benchmark) for column details.
+
+### `kem_hyper_benchmark.csv` / `dsa_hyper_benchmark.csv`
+
+Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
 
 ---
 
@@ -403,6 +460,8 @@ Variable-k results (median keygen latency, us, turboshake backend):
 | Slow liboqs clone | The script uses `--depth=1` for liboqs; still ~100MB on slow networks |
 | `-Werror` from PQClean | PQClean uses `-Werror`; if gcc version differs, ignore (builds succeed) |
 | `kem_k_bench.sh` FAIL for high k | Ensure setup.sh completed; the script recompiles from PQClean sources |
+| `hyper_bench.sh` DSA signing very slow | Some parameter combos (e.g., 44-base with K=6, omega=55) cause high rejection rates — this is the expected research result |
+| `hyper_bench.sh` CORRECTNESS FAILED | Non-standard parameters may break correctness; try parameters closer to standard values |
 
 ---
 

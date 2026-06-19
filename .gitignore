@@ -21,6 +21,12 @@ liboqs/
 # Generated benchmark output
 pqc_benchmark_results.csv
 full_benchmark_results.csv
+kem_hyper_benchmark.csv
+dsa_hyper_benchmark.csv
+
+# Temporary build directories
+.hyper_build/
+.kem_k_build/
 liboqs_test_*.log
 liboqs_speed*.log
 liboqs_speed_summary.txt
