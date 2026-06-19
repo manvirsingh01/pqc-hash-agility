@@ -20,6 +20,10 @@
 # Recompiles PQClean source with patched params and benchmarks correctness
 # + timing for keygen/encaps/decaps (KEM) or keygen/sign/verify (DSA).
 #
+# For each parameter combination, generates BOTH benchmark types:
+#   custom  — user-selected (tweaked) hyperparameters
+#   library — standard default parameters (baseline comparison)
+#
 # Output: kem_hyper_benchmark.csv or dsa_hyper_benchmark.csv
 #
 # Usage:
@@ -105,6 +109,8 @@ echo "║   PQC Hyperparameter Benchmark                         ║"
 echo "║                                                         ║"
 echo "║   Tweak cryptographic parameters and measure impact     ║"
 echo "║   on performance, key sizes, and correctness.           ║"
+echo "║                                                         ║"
+echo "║   Generates both custom and library benchmarks.         ║"
 echo "╚══════════════════════════════════════════════════════════╝"
 echo ""
 echo "  Algorithm family:"
@@ -157,11 +163,13 @@ if [ "$FAMILY" = "1" ]; then
     POLYCOMP=128; PVCOMP_K=320
     KEM_TEMPLATE="ml-kem-512"
     PROF_LABEL="A (du=10, dv=4, eta1=3)"
+    DEF_K=2
   elif [ "$PROFILE" = "B" ]; then
     ETA1=2; ETA2=2; DU=11; DV=5
     POLYCOMP=160; PVCOMP_K=352
     KEM_TEMPLATE="ml-kem-1024"
     PROF_LABEL="B (du=11, dv=5, eta1=2)"
+    DEF_K=4
   else
     echo "ERROR: Invalid profile. Use A or B."; exit 1
   fi
@@ -193,14 +201,18 @@ if [ "$FAMILY" = "1" ]; then
 
   select_backends
 
-  TOTAL=$(( ${#K_VALUES[@]} * ${#BACKENDS[@]} ))
+  CUSTOM_TOTAL=$(( ${#K_VALUES[@]} * ${#BACKENDS[@]} ))
+  LIBRARY_TOTAL=${#BACKENDS[@]}
+  TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
   echo ""
   echo "  ───────────────────────────────────────────"
   echo "  Family       : ML-KEM"
   echo "  Profile      : $PROF_LABEL"
   echo "  k values     : ${K_VALUES[*]}"
   echo "  Backends     : ${BACKENDS[*]}"
-  echo "  Combinations : $TOTAL"
+  echo "  Library runs : $LIBRARY_TOTAL (default k=$DEF_K per backend)"
+  echo "  Custom runs  : $CUSTOM_TOTAL"
+  echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
   echo "  Output CSV   : $CSV"
@@ -210,46 +222,38 @@ if [ "$FAMILY" = "1" ]; then
 
   echo "backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes" > "$ROOT/$CSV"
 
-  COMBO=0
-  for K in "${K_VALUES[@]}"; do
-    PK_BYTES=$((384 * K + 32))
-    SK_BYTES=$((768 * K + 96))
-    CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
+  # ── KEM compile + benchmark function ──
+  run_kem_bench() {
+    local K=$1 BACKEND=$2 BENCH_TYPE=$3
 
-    echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV"
-    echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local PK_BYTES=$((384 * K + 32))
+    local SK_BYTES=$((768 * K + 96))
+    local CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
 
-    for BACKEND in "${BACKENDS[@]}"; do
-      COMBO=$((COMBO + 1))
-      echo ""
-      echo "  [$COMBO/$TOTAL] $BACKEND / k=$K / profile $PROFILE"
+    local SRC_DIR
+    if [ "$BACKEND" = "shake" ]; then
+      SRC_DIR="$PQCLEAN/crypto_kem/$KEM_TEMPLATE/clean"
+    else
+      SRC_DIR="$PQCLEAN_CUSTOM/crypto_kem/$KEM_TEMPLATE/$BACKEND"
+    fi
 
-      if [ "$BACKEND" = "shake" ]; then
-        SRC_DIR="$PQCLEAN/crypto_kem/$KEM_TEMPLATE/clean"
-      else
-        SRC_DIR="$PQCLEAN_CUSTOM/crypto_kem/$KEM_TEMPLATE/$BACKEND"
-      fi
+    if [ ! -d "$SRC_DIR" ]; then
+      echo "  [SKIP] $SRC_DIR not found"
+      return
+    fi
 
-      if [ ! -d "$SRC_DIR" ]; then
-        echo "  [SKIP] $SRC_DIR not found"
-        continue
-      fi
+    local VDIR="$HBUILD/kem-k${K}-${BACKEND}-P${PROFILE}-${BENCH_TYPE}"
+    rm -rf "$VDIR"; mkdir -p "$VDIR"
+    cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
 
-      VDIR="$HBUILD/kem-k${K}-${BACKEND}-P${PROFILE}"
-      rm -rf "$VDIR"; mkdir -p "$VDIR"
-      cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
+    local PREFIX
+    PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_kem_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_kem_keypair//' || echo "")
+    if [ -z "$PREFIX" ]; then
+      echo "  [SKIP] Cannot detect function prefix from api.h"
+      return
+    fi
 
-      PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_kem_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_kem_keypair//' || echo "")
-      if [ -z "$PREFIX" ]; then
-        echo "  [SKIP] Cannot detect function prefix from api.h"
-        continue
-      fi
-
-      # Patch params.h
-      cat > "$VDIR/params.h" << PEOF
+    cat > "$VDIR/params.h" << PEOF
 #ifndef HYPER_KEM_PARAMS_H
 #define HYPER_KEM_PARAMS_H
 #define KYBER_N 256
@@ -273,8 +277,7 @@ if [ "$FAMILY" = "1" ]; then
 #endif
 PEOF
 
-      # Patch api.h
-      cat > "$VDIR/api.h" << AEOF
+    cat > "$VDIR/api.h" << AEOF
 #ifndef HYPER_KEM_API_H
 #define HYPER_KEM_API_H
 #include <stdint.h>
@@ -289,27 +292,27 @@ int ${PREFIX}_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 #endif
 AEOF
 
-      CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+    local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
-      OBJ_FILES=""
-      COMPILE_OK=1
-      for SRC_FILE in "$VDIR"/*.c; do
-        [ -f "$SRC_FILE" ] || continue
-        OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
-        if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
-          echo "  [ERROR] compile $(basename "$SRC_FILE")"
-          COMPILE_OK=0; break
-        fi
-        OBJ_FILES="$OBJ_FILES $OBJ"
-      done
-      [ "$COMPILE_OK" = "1" ] || continue
+    local OBJ_FILES=""
+    local COMPILE_OK=1
+    local SRC_FILE OBJ
+    for SRC_FILE in "$VDIR"/*.c; do
+      [ -f "$SRC_FILE" ] || continue
+      OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
+      if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
+        echo "  [ERROR] compile $(basename "$SRC_FILE")"
+        COMPILE_OK=0; break
+      fi
+      OBJ_FILES="$OBJ_FILES $OBJ"
+    done
+    [ "$COMPILE_OK" = "1" ] || return
 
-      LIB="$VDIR/libmlkem_hyper.a"
-      ar rcs "$LIB" $OBJ_FILES
+    local LIB="$VDIR/libmlkem_hyper.a"
+    ar rcs "$LIB" $OBJ_FILES
 
-      # Write benchmark driver
-      BENCH_C="$VDIR/bench_hyper.c"
-      cat > "$BENCH_C" << 'BENCHEOF'
+    local BENCH_C="$VDIR/bench_hyper.c"
+    cat > "$BENCH_C" << 'BENCHEOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -351,16 +354,17 @@ static Stats compute(uint64_t *s, int n) {
 }
 BENCHEOF
 
-      cat >> "$BENCH_C" << MAINEOF
+    cat >> "$BENCH_C" << MAINEOF
 int main(int argc, char **argv) {
     int iters = 1000, warmup = 100;
-    const char *csv = NULL, *backend = "unknown", *profile = "?";
+    const char *csv = NULL, *backend = "unknown", *profile = "?", *bench_type = "custom";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--iters") && i + 1 < argc)   iters = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc) warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--csv") && i + 1 < argc)    csv = argv[++i];
         else if (!strcmp(argv[i], "--backend") && i + 1 < argc) backend = argv[++i];
         else if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else if (!strcmp(argv[i], "--type") && i + 1 < argc)   bench_type = argv[++i];
     }
     int k_val = KYBER_K;
     uint8_t pk[${PREFIX}_CRYPTO_PUBLICKEYBYTES];
@@ -379,8 +383,8 @@ int main(int argc, char **argv) {
 
     char algo[64];
     snprintf(algo, sizeof(algo), "ML-KEM-k%d-P%s", k_val, profile);
-    printf("  %-12s %-24s %s  (pk=%d sk=%d ct=%d)\n",
-           backend, algo, correct,
+    printf("  %-12s %-24s %s  [%s]  (pk=%d sk=%d ct=%d)\n",
+           backend, algo, correct, bench_type,
            ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
            ${PREFIX}_CRYPTO_SECRETKEYBYTES,
            ${PREFIX}_CRYPTO_CIPHERTEXTBYTES);
@@ -411,12 +415,12 @@ int main(int argc, char **argv) {
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
-            fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,KEM,%s,%s,%d,"
+            fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,%s,%s,%s,%d,"
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%.2f,%d,%d,%d,%d\n",
                 backend, algo, profile, k_val, $ETA1, $ETA2, $DU, $DV,
-                ops[op], correct, iters,
+                bench_type, ops[op], correct, iters,
                 st.mean, st.median, st.mn, st.mx, st.sd, st.p95, st.p99, st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
@@ -430,16 +434,66 @@ int main(int argc, char **argv) {
 }
 MAINEOF
 
-      LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
-      BENCH_BIN="$VDIR/bench_hyper"
+    local LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
+    local BENCH_BIN="$VDIR/bench_hyper"
 
-      if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
-        echo "  [ERROR] link failed"
-        continue
-      fi
+    if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
+      echo "  [ERROR] link failed"
+      return
+    fi
 
-      echo "  [OK] Running benchmark..."
-      "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --profile "$PROFILE"
+    echo "  [OK] Running benchmark..."
+    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --profile "$PROFILE" --type "$BENCH_TYPE"
+  }
+
+  COMBO=0
+
+  # ── Phase 1: Library benchmark (standard default parameters) ──
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Phase 1: Library (default k=$DEF_K)"
+  echo "═══════════════════════════════════════════════════════════"
+
+  K=$DEF_K
+  PK_BYTES=$((384 * K + 32))
+  SK_BYTES=$((768 * K + 96))
+  CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV  [library default]"
+  echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  for BACKEND in "${BACKENDS[@]}"; do
+    COMBO=$((COMBO + 1))
+    echo ""
+    echo "  [$COMBO/$TOTAL] $BACKEND / k=$K / profile $PROFILE [library]"
+    run_kem_bench "$DEF_K" "$BACKEND" "library"
+  done
+
+  # ── Phase 2: Custom benchmark (user-selected parameters) ──
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Phase 2: Custom (user-selected k values)"
+  echo "═══════════════════════════════════════════════════════════"
+
+  for K in "${K_VALUES[@]}"; do
+    PK_BYTES=$((384 * K + 32))
+    SK_BYTES=$((768 * K + 96))
+    CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
+
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV  [custom]"
+    echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    for BACKEND in "${BACKENDS[@]}"; do
+      COMBO=$((COMBO + 1))
+      echo ""
+      echo "  [$COMBO/$TOTAL] $BACKEND / k=$K / profile $PROFILE [custom]"
+      run_kem_bench "$K" "$BACKEND" "custom"
     done
   done
 
@@ -450,6 +504,10 @@ MAINEOF
   ROWS=$(wc -l < "$ROOT/$CSV" 2>/dev/null || echo 0)
   echo "  Results      : $CSV ($ROWS rows)"
   echo "  System info  : system_info.txt"
+  echo ""
+  echo "  Benchmark types:"
+  echo "    library — standard default parameters (k=$DEF_K)"
+  echo "    custom  — user-selected parameters (k=${K_VALUES[*]})"
   echo ""
   echo "  CSV columns:"
   echo "    backend, algorithm, profile, k, eta1, eta2, du, dv,"
@@ -490,18 +548,21 @@ elif [ "$FAMILY" = "2" ]; then
       DSA_ETA=2; DSA_GAMMA1_BITS=17; DSA_GAMMA2_DIV=88
       DSA_CTILDE=32; DSA_POLYETA=96; DSA_POLYZ=576; DSA_POLYW1=192
       BASE_LABEL="44-base (eta=2, gamma1=2^17, gamma2=(Q-1)/88)"
+      DEF_K_D=4; DEF_L_D=4; DEF_TAU_D=39; DEF_OMEGA_D=80
       ;;
     2)
       DSA_TEMPLATE="ml-dsa-65"
       DSA_ETA=4; DSA_GAMMA1_BITS=19; DSA_GAMMA2_DIV=32
       DSA_CTILDE=48; DSA_POLYETA=128; DSA_POLYZ=640; DSA_POLYW1=128
       BASE_LABEL="65-base (eta=4, gamma1=2^19, gamma2=(Q-1)/32)"
+      DEF_K_D=6; DEF_L_D=5; DEF_TAU_D=49; DEF_OMEGA_D=55
       ;;
     3)
       DSA_TEMPLATE="ml-dsa-87"
       DSA_ETA=2; DSA_GAMMA1_BITS=19; DSA_GAMMA2_DIV=32
       DSA_CTILDE=64; DSA_POLYETA=96; DSA_POLYZ=640; DSA_POLYW1=128
       BASE_LABEL="87-base (eta=2, gamma1=2^19, gamma2=(Q-1)/32)"
+      DEF_K_D=8; DEF_L_D=7; DEF_TAU_D=60; DEF_OMEGA_D=75
       ;;
     *) echo "Invalid selection"; exit 1 ;;
   esac
@@ -570,7 +631,9 @@ elif [ "$FAMILY" = "2" ]; then
 
   select_backends
 
-  TOTAL=$(( ${#K_DSA_VALUES[@]} * ${#L_DSA_VALUES[@]} * ${#TAU_VALUES[@]} * ${#OMEGA_VALUES[@]} * ${#BACKENDS[@]} ))
+  CUSTOM_TOTAL=$(( ${#K_DSA_VALUES[@]} * ${#L_DSA_VALUES[@]} * ${#TAU_VALUES[@]} * ${#OMEGA_VALUES[@]} * ${#BACKENDS[@]} ))
+  LIBRARY_TOTAL=${#BACKENDS[@]}
+  TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
   echo ""
   echo "  ───────────────────────────────────────────"
   echo "  Family       : ML-DSA"
@@ -580,7 +643,9 @@ elif [ "$FAMILY" = "2" ]; then
   echo "  tau values   : ${TAU_VALUES[*]}"
   echo "  omega values : ${OMEGA_VALUES[*]}"
   echo "  Backends     : ${BACKENDS[*]}"
-  echo "  Combinations : $TOTAL"
+  echo "  Library runs : $LIBRARY_TOTAL (default K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
+  echo "  Custom runs  : $CUSTOM_TOTAL"
+  echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
   echo "  Output CSV   : $CSV"
@@ -592,68 +657,56 @@ elif [ "$FAMILY" = "2" ]; then
 
   DSA_Q=8380417
 
-  COMBO=0
-  for K_D in "${K_DSA_VALUES[@]}"; do
-    for L_D in "${L_DSA_VALUES[@]}"; do
-      for TAU_D in "${TAU_VALUES[@]}"; do
-        for OMEGA_D in "${OMEGA_VALUES[@]}"; do
+  # ── DSA compile + benchmark function ──
+  run_dsa_bench() {
+    local K_D=$1 L_D=$2 TAU_D=$3 OMEGA_D=$4 BACKEND=$5 BENCH_TYPE=$6
 
-          BETA_D=$((TAU_D * DSA_ETA))
-          GAMMA1_D=$((1 << DSA_GAMMA1_BITS))
+    local BETA_D=$((TAU_D * DSA_ETA))
+    local GAMMA1_D=$((1 << DSA_GAMMA1_BITS))
 
-          if [ "$BETA_D" -ge "$GAMMA1_D" ]; then
-            echo ""
-            echo "  [SKIP] K=$K_D L=$L_D tau=$TAU_D: beta=$BETA_D >= gamma1=$GAMMA1_D (signing would loop forever)"
-            continue
-          fi
+    if [ "$BETA_D" -ge "$GAMMA1_D" ]; then
+      echo ""
+      echo "  [SKIP] K=$K_D L=$L_D tau=$TAU_D: beta=$BETA_D >= gamma1=$GAMMA1_D (signing would loop forever)"
+      return
+    fi
 
-          PK_D=$((32 + K_D * 320))
-          SK_D=$((128 + (K_D + L_D) * DSA_POLYETA + K_D * 416))
-          POLYVECH_D=$((OMEGA_D + K_D))
-          SIG_D=$((DSA_CTILDE + L_D * DSA_POLYZ + POLYVECH_D))
+    local PK_D=$((32 + K_D * 320))
+    local SK_D=$((128 + (K_D + L_D) * DSA_POLYETA + K_D * 416))
+    local POLYVECH_D=$((OMEGA_D + K_D))
+    local SIG_D=$((DSA_CTILDE + L_D * DSA_POLYZ + POLYVECH_D))
 
-          echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  ML-DSA  K=$K_D  L=$L_D  tau=$TAU_D  omega=$OMEGA_D  beta=$BETA_D"
-          echo "  PK=${PK_D}B  SK=${SK_D}B  SIG=${SIG_D}B"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    local SRC_DIR
+    if [ "$BACKEND" = "shake" ]; then
+      SRC_DIR="$PQCLEAN/crypto_sign/$DSA_TEMPLATE/clean"
+    else
+      SRC_DIR="$PQCLEAN_CUSTOM/crypto_sign/$DSA_TEMPLATE/$BACKEND"
+    fi
 
-          for BACKEND in "${BACKENDS[@]}"; do
-            COMBO=$((COMBO + 1))
-            echo ""
-            echo "  [$COMBO/$TOTAL] $BACKEND / K=$K_D L=$L_D tau=$TAU_D omega=$OMEGA_D"
+    if [ ! -d "$SRC_DIR" ]; then
+      echo "  [SKIP] $SRC_DIR not found"
+      return
+    fi
 
-            if [ "$BACKEND" = "shake" ]; then
-              SRC_DIR="$PQCLEAN/crypto_sign/$DSA_TEMPLATE/clean"
-            else
-              SRC_DIR="$PQCLEAN_CUSTOM/crypto_sign/$DSA_TEMPLATE/$BACKEND"
-            fi
+    local VDIR="$HBUILD/dsa-K${K_D}L${L_D}t${TAU_D}o${OMEGA_D}-${BACKEND}-${BENCH_TYPE}"
+    rm -rf "$VDIR"; mkdir -p "$VDIR"
+    cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
 
-            if [ ! -d "$SRC_DIR" ]; then
-              echo "  [SKIP] $SRC_DIR not found"
-              continue
-            fi
+    local PREFIX
+    PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_sign_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_sign_keypair//' || echo "")
+    if [ -z "$PREFIX" ]; then
+      echo "  [SKIP] Cannot detect function prefix from api.h"
+      return
+    fi
 
-            VDIR="$HBUILD/dsa-K${K_D}L${L_D}t${TAU_D}o${OMEGA_D}-${BACKEND}"
-            rm -rf "$VDIR"; mkdir -p "$VDIR"
-            cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
+    local GAMMA1_C="(1 << $DSA_GAMMA1_BITS)"
+    local GAMMA2_C
+    if [ "$DSA_GAMMA2_DIV" = "88" ]; then
+      GAMMA2_C="(($DSA_Q-1)/88)"
+    else
+      GAMMA2_C="(($DSA_Q-1)/32)"
+    fi
 
-            PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_sign_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_sign_keypair//' || echo "")
-            if [ -z "$PREFIX" ]; then
-              echo "  [SKIP] Cannot detect function prefix from api.h"
-              continue
-            fi
-
-            # Derive gamma1/gamma2 expressions for C
-            GAMMA1_C="(1 << $DSA_GAMMA1_BITS)"
-            if [ "$DSA_GAMMA2_DIV" = "88" ]; then
-              GAMMA2_C="(($DSA_Q-1)/88)"
-            else
-              GAMMA2_C="(($DSA_Q-1)/32)"
-            fi
-
-            # Patch params.h
-            cat > "$VDIR/params.h" << PEOF
+    cat > "$VDIR/params.h" << PEOF
 #ifndef HYPER_DSA_PARAMS_H
 #define HYPER_DSA_PARAMS_H
 
@@ -691,8 +744,7 @@ elif [ "$FAMILY" = "2" ]; then
 #endif
 PEOF
 
-            # Patch api.h — include params.h for CRYPTO_* sizes (avoid redefinition)
-            cat > "$VDIR/api.h" << AEOF
+    cat > "$VDIR/api.h" << AEOF
 #ifndef HYPER_DSA_API_H
 #define HYPER_DSA_API_H
 #include <stddef.h>
@@ -734,27 +786,27 @@ int ${PREFIX}_crypto_sign_open(uint8_t *m, size_t *mlen,
 #endif
 AEOF
 
-            CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+    local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
-            OBJ_FILES=""
-            COMPILE_OK=1
-            for SRC_FILE in "$VDIR"/*.c; do
-              [ -f "$SRC_FILE" ] || continue
-              OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
-              if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
-                echo "  [ERROR] compile $(basename "$SRC_FILE")"
-                COMPILE_OK=0; break
-              fi
-              OBJ_FILES="$OBJ_FILES $OBJ"
-            done
-            [ "$COMPILE_OK" = "1" ] || continue
+    local OBJ_FILES=""
+    local COMPILE_OK=1
+    local SRC_FILE OBJ
+    for SRC_FILE in "$VDIR"/*.c; do
+      [ -f "$SRC_FILE" ] || continue
+      OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
+      if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
+        echo "  [ERROR] compile $(basename "$SRC_FILE")"
+        COMPILE_OK=0; break
+      fi
+      OBJ_FILES="$OBJ_FILES $OBJ"
+    done
+    [ "$COMPILE_OK" = "1" ] || return
 
-            LIB="$VDIR/libmldsa_hyper.a"
-            ar rcs "$LIB" $OBJ_FILES
+    local LIB="$VDIR/libmldsa_hyper.a"
+    ar rcs "$LIB" $OBJ_FILES
 
-            # Write DSA benchmark driver
-            BENCH_C="$VDIR/bench_hyper.c"
-            cat > "$BENCH_C" << 'BENCHEOF'
+    local BENCH_C="$VDIR/bench_hyper.c"
+    cat > "$BENCH_C" << 'BENCHEOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -796,16 +848,17 @@ static Stats compute(uint64_t *s, int n) {
 }
 BENCHEOF
 
-            cat >> "$BENCH_C" << MAINEOF
+    cat >> "$BENCH_C" << MAINEOF
 int main(int argc, char **argv) {
     int iters = 1000, warmup = 100;
-    const char *csv = NULL, *backend = "unknown", *base = "?";
+    const char *csv = NULL, *backend = "unknown", *base = "?", *bench_type = "custom";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--iters") && i + 1 < argc)    iters = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--warmup") && i + 1 < argc)  warmup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--csv") && i + 1 < argc)     csv = argv[++i];
         else if (!strcmp(argv[i], "--backend") && i + 1 < argc) backend = argv[++i];
         else if (!strcmp(argv[i], "--base") && i + 1 < argc)    base = argv[++i];
+        else if (!strcmp(argv[i], "--type") && i + 1 < argc)    bench_type = argv[++i];
     }
 
     uint8_t pk[${PREFIX}_CRYPTO_PUBLICKEYBYTES];
@@ -824,8 +877,8 @@ int main(int argc, char **argv) {
 
     char algo[64];
     snprintf(algo, sizeof(algo), "ML-DSA-K%dL%d", K, L);
-    printf("  %-12s %-20s %s  (pk=%d sk=%d sig=%d)\n",
-           backend, algo, correct,
+    printf("  %-12s %-20s %s  [%s]  (pk=%d sk=%d sig=%d)\n",
+           backend, algo, correct, bench_type,
            ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
            ${PREFIX}_CRYPTO_SECRETKEYBYTES,
            ${PREFIX}_CRYPTO_BYTES);
@@ -856,13 +909,13 @@ int main(int argc, char **argv) {
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
-            fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,DSA,%s,%s,%d,"
+            fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%d,"
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%.2f,%d,%d,%d\n",
                 backend, algo, base, K, L, $DSA_ETA, $TAU_D, $BETA_D,
                 $DSA_GAMMA1_BITS, $DSA_GAMMA2_DIV, $OMEGA_D, $DSA_CTILDE,
-                ops[op], correct, iters,
+                bench_type, ops[op], correct, iters,
                 st.mean, st.median, st.mn, st.mx, st.sd, st.p95, st.p99, st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
@@ -875,16 +928,81 @@ int main(int argc, char **argv) {
 }
 MAINEOF
 
-            LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
-            BENCH_BIN="$VDIR/bench_hyper"
+    local LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
+    local BENCH_BIN="$VDIR/bench_hyper"
 
-            if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
-              echo "  [ERROR] link failed"
-              continue
-            fi
+    if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
+      echo "  [ERROR] link failed"
+      return
+    fi
 
-            echo "  [OK] Running benchmark..."
-            "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --base "$DSA_BASE"
+    echo "  [OK] Running benchmark..."
+    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --base "$DSA_BASE" --type "$BENCH_TYPE"
+  }
+
+  COMBO=0
+
+  # ── Phase 1: Library benchmark (standard default parameters) ──
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Phase 1: Library (default K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
+  echo "═══════════════════════════════════════════════════════════"
+
+  DEF_BETA_D=$((DEF_TAU_D * DSA_ETA))
+  DEF_PK_D=$((32 + DEF_K_D * 320))
+  DEF_SK_D=$((128 + (DEF_K_D + DEF_L_D) * DSA_POLYETA + DEF_K_D * 416))
+  DEF_POLYVECH_D=$((DEF_OMEGA_D + DEF_K_D))
+  DEF_SIG_D=$((DSA_CTILDE + DEF_L_D * DSA_POLYZ + DEF_POLYVECH_D))
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  ML-DSA  K=$DEF_K_D  L=$DEF_L_D  tau=$DEF_TAU_D  omega=$DEF_OMEGA_D  beta=$DEF_BETA_D  [library default]"
+  echo "  PK=${DEF_PK_D}B  SK=${DEF_SK_D}B  SIG=${DEF_SIG_D}B"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  for BACKEND in "${BACKENDS[@]}"; do
+    COMBO=$((COMBO + 1))
+    echo ""
+    echo "  [$COMBO/$TOTAL] $BACKEND / K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D [library]"
+    run_dsa_bench "$DEF_K_D" "$DEF_L_D" "$DEF_TAU_D" "$DEF_OMEGA_D" "$BACKEND" "library"
+  done
+
+  # ── Phase 2: Custom benchmark (user-selected parameters) ──
+  echo ""
+  echo "═══════════════════════════════════════════════════════════"
+  echo "  Phase 2: Custom (user-selected parameters)"
+  echo "═══════════════════════════════════════════════════════════"
+
+  for K_D in "${K_DSA_VALUES[@]}"; do
+    for L_D in "${L_DSA_VALUES[@]}"; do
+      for TAU_D in "${TAU_VALUES[@]}"; do
+        for OMEGA_D in "${OMEGA_VALUES[@]}"; do
+
+          BETA_D=$((TAU_D * DSA_ETA))
+          GAMMA1_D=$((1 << DSA_GAMMA1_BITS))
+
+          if [ "$BETA_D" -ge "$GAMMA1_D" ]; then
+            echo ""
+            echo "  [SKIP] K=$K_D L=$L_D tau=$TAU_D: beta=$BETA_D >= gamma1=$GAMMA1_D (signing would loop forever)"
+            continue
+          fi
+
+          PK_D=$((32 + K_D * 320))
+          SK_D=$((128 + (K_D + L_D) * DSA_POLYETA + K_D * 416))
+          POLYVECH_D=$((OMEGA_D + K_D))
+          SIG_D=$((DSA_CTILDE + L_D * DSA_POLYZ + POLYVECH_D))
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ML-DSA  K=$K_D  L=$L_D  tau=$TAU_D  omega=$OMEGA_D  beta=$BETA_D  [custom]"
+          echo "  PK=${PK_D}B  SK=${SK_D}B  SIG=${SIG_D}B"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+          for BACKEND in "${BACKENDS[@]}"; do
+            COMBO=$((COMBO + 1))
+            echo ""
+            echo "  [$COMBO/$TOTAL] $BACKEND / K=$K_D L=$L_D tau=$TAU_D omega=$OMEGA_D [custom]"
+            run_dsa_bench "$K_D" "$L_D" "$TAU_D" "$OMEGA_D" "$BACKEND" "custom"
           done
         done
       done
@@ -898,6 +1016,10 @@ MAINEOF
   ROWS=$(wc -l < "$ROOT/$CSV" 2>/dev/null || echo 0)
   echo "  Results      : $CSV ($ROWS rows)"
   echo "  System info  : system_info.txt"
+  echo ""
+  echo "  Benchmark types:"
+  echo "    library — standard default parameters (K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
+  echo "    custom  — user-selected parameters"
   echo ""
   echo "  CSV columns:"
   echo "    backend, algorithm, base, K, L, eta, tau, beta,"

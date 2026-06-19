@@ -221,6 +221,12 @@ eta1, eta2, du_bits, dv_bits
 
 Interactive script to benchmark **ML-KEM** and **ML-DSA** with custom cryptographic hyperparameters. Recompiles PQClean source with patched parameters, runs correctness checks, and produces detailed CSV output.
 
+For each parameter combination, generates **both** benchmark types:
+- **library** — standard default parameters (baseline for comparison)
+- **custom** — user-selected (tweaked) hyperparameters
+
+The `type` column in the CSV distinguishes the two, enabling direct performance comparison between tweaked and default parameters.
+
 ```bash
 bash hyper_bench.sh
 bash hyper_bench.sh --iters 500 --warmup 50
@@ -239,7 +245,11 @@ k values: 1-8 (standard: 2/3/4; research: 1/5-8).
 
 This lets you explore combinations that `kem_k_bench.sh` doesn't cover — e.g., k=5 with profile A (du=10/dv=4) vs. profile B (du=11/dv=5).
 
+Library defaults per profile: Profile A → k=2 (ML-KEM-512), Profile B → k=4 (ML-KEM-1024).
+
 Output: `kem_hyper_benchmark.csv` with columns: `backend, algorithm, profile, k, eta1, eta2, du, dv, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_bytes, ss_bytes`
+
+The `type` column contains `library` (default k) or `custom` (user-selected k).
 
 #### ML-DSA mode
 
@@ -262,7 +272,11 @@ Tweakable parameters:
 
 beta is auto-computed as `tau * eta`. The script validates that `beta < gamma1` (otherwise signing loops forever).
 
+Library defaults per base: 44-base → K=4 L=4 tau=39 omega=80, 65-base → K=6 L=5 tau=49 omega=55, 87-base → K=8 L=7 tau=60 omega=75.
+
 Output: `dsa_hyper_benchmark.csv` with columns: `backend, algorithm, base, K, L, eta, tau, beta, gamma1_bits, gamma2_div, omega, ctildebytes, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, sig_bytes`
+
+The `type` column contains `library` (default params) or `custom` (user-selected params).
 
 ---
 
@@ -340,7 +354,7 @@ Variable number of rows depending on chosen k values and backends. See [kem_k_be
 
 ### `kem_hyper_benchmark.csv` / `dsa_hyper_benchmark.csv`
 
-Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
+Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. The `type` column distinguishes `library` (standard default parameters) from `custom` (user-tweaked parameters), enabling direct performance comparison. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
 
 ---
 
