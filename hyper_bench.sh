@@ -24,7 +24,9 @@
 #   custom  — user-selected (tweaked) hyperparameters
 #   library — standard default parameters (baseline comparison)
 #
-# Output: kem_hyper_benchmark.csv or dsa_hyper_benchmark.csv
+# Output (in results/ directory):
+#   KEM: custom_kem_hyper_benchmark.csv + library_default_kem_hyper_benchmark.csv
+#   DSA: custom_dsa_hyper_benchmark.csv + library_default_dsa_hyper_benchmark.csv
 #
 # Usage:
 #   cd <build-dir>
@@ -34,8 +36,10 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(pwd)"
-ITERS=1000
-WARMUP=100
+RESULTS_DIR="$ROOT/results"
+mkdir -p "$RESULTS_DIR"
+ITERS=200
+WARMUP=20
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -72,7 +76,7 @@ for f in "$OQS_STATIC" "$XKCP_LIB"; do
 done
 
 # ── Generate system info ──
-bash "$REPO/system_info.sh" system_info.txt
+bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
 # ── Backend selection ──
 select_backends() {
@@ -137,7 +141,8 @@ COMMON_OBJS="$HBUILD/fips202.o $HBUILD/randombytes.o"
 # ═══════════════════════════════════════════════════════════════
 if [ "$FAMILY" = "1" ]; then
 
-  CSV="kem_hyper_benchmark.csv"
+  CSV_CUSTOM="custom_kem_hyper_benchmark.csv"
+  CSV_LIBRARY="library_default_kem_hyper_benchmark.csv"
 
   echo ""
   echo "  ── ML-KEM Compression Profile ──"
@@ -215,12 +220,15 @@ if [ "$FAMILY" = "1" ]; then
   echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
-  echo "  Output CSV   : $CSV"
+  echo "  Custom CSV   : $CSV_CUSTOM"
+  echo "  Library CSV  : $CSV_LIBRARY"
   echo "  ───────────────────────────────────────────"
   echo ""
   read -rp "  Press ENTER to start... "
 
-  echo "backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes" > "$ROOT/$CSV"
+  KEM_HEADER="backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes"
+  echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+  echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
   # ── KEM compile + benchmark function ──
   run_kem_bench() {
@@ -443,7 +451,13 @@ MAINEOF
     fi
 
     echo "  [OK] Running benchmark..."
-    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --profile "$PROFILE" --type "$BENCH_TYPE"
+    local CSV_FILE
+    if [ "$BENCH_TYPE" = "library" ]; then
+      CSV_FILE="$CSV_LIBRARY"
+    else
+      CSV_FILE="$CSV_CUSTOM"
+    fi
+    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --profile "$PROFILE" --type "$BENCH_TYPE"
   }
 
   COMBO=0
@@ -501,20 +515,15 @@ MAINEOF
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  ML-KEM Hyperparameter Benchmark DONE"
   echo ""
-  ROWS=$(wc -l < "$ROOT/$CSV" 2>/dev/null || echo 0)
-  echo "  Results      : $CSV ($ROWS rows)"
-  echo "  System info  : system_info.txt"
+  ROWS_C=$(wc -l < "$RESULTS_DIR/$CSV_CUSTOM" 2>/dev/null || echo 0)
+  ROWS_L=$(wc -l < "$RESULTS_DIR/$CSV_LIBRARY" 2>/dev/null || echo 0)
+  echo "  Custom results  : results/$CSV_CUSTOM ($ROWS_C rows)"
+  echo "  Library results : results/$CSV_LIBRARY ($ROWS_L rows)"
+  echo "  System info     : results/system_info.txt"
   echo ""
   echo "  Benchmark types:"
-  echo "    library — standard default parameters (k=$DEF_K)"
-  echo "    custom  — user-selected parameters (k=${K_VALUES[*]})"
-  echo ""
-  echo "  CSV columns:"
-  echo "    backend, algorithm, profile, k, eta1, eta2, du, dv,"
-  echo "    type, operation, correctness, iterations,"
-  echo "    mean_ns, median_ns, min_ns, max_ns,"
-  echo "    stddev_ns, p95_ns, p99_ns, ops_per_sec,"
-  echo "    pk_bytes, sk_bytes, ct_bytes, ss_bytes"
+  echo "    $CSV_CUSTOM  — user-selected parameters (k=${K_VALUES[*]})"
+  echo "    $CSV_LIBRARY — standard default parameters (k=$DEF_K)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
@@ -523,7 +532,8 @@ MAINEOF
 # ═══════════════════════════════════════════════════════════════
 elif [ "$FAMILY" = "2" ]; then
 
-  CSV="dsa_hyper_benchmark.csv"
+  CSV_CUSTOM="custom_dsa_hyper_benchmark.csv"
+  CSV_LIBRARY="library_default_dsa_hyper_benchmark.csv"
 
   echo ""
   echo "  ── ML-DSA Code Base ──"
@@ -648,12 +658,15 @@ elif [ "$FAMILY" = "2" ]; then
   echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
-  echo "  Output CSV   : $CSV"
+  echo "  Custom CSV   : $CSV_CUSTOM"
+  echo "  Library CSV  : $CSV_LIBRARY"
   echo "  ───────────────────────────────────────────"
   echo ""
   read -rp "  Press ENTER to start... "
 
-  echo "backend,algorithm,base,K,L,eta,tau,beta,gamma1_bits,gamma2_div,omega,ctildebytes,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,sig_bytes" > "$ROOT/$CSV"
+  DSA_HEADER="backend,algorithm,base,K,L,eta,tau,beta,gamma1_bits,gamma2_div,omega,ctildebytes,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,sig_bytes"
+  echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+  echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
   DSA_Q=8380417
 
@@ -937,7 +950,13 @@ MAINEOF
     fi
 
     echo "  [OK] Running benchmark..."
-    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND" --base "$DSA_BASE" --type "$BENCH_TYPE"
+    local CSV_FILE
+    if [ "$BENCH_TYPE" = "library" ]; then
+      CSV_FILE="$CSV_LIBRARY"
+    else
+      CSV_FILE="$CSV_CUSTOM"
+    fi
+    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --base "$DSA_BASE" --type "$BENCH_TYPE"
   }
 
   COMBO=0
@@ -1013,21 +1032,15 @@ MAINEOF
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  ML-DSA Hyperparameter Benchmark DONE"
   echo ""
-  ROWS=$(wc -l < "$ROOT/$CSV" 2>/dev/null || echo 0)
-  echo "  Results      : $CSV ($ROWS rows)"
-  echo "  System info  : system_info.txt"
+  ROWS_C=$(wc -l < "$RESULTS_DIR/$CSV_CUSTOM" 2>/dev/null || echo 0)
+  ROWS_L=$(wc -l < "$RESULTS_DIR/$CSV_LIBRARY" 2>/dev/null || echo 0)
+  echo "  Custom results  : results/$CSV_CUSTOM ($ROWS_C rows)"
+  echo "  Library results : results/$CSV_LIBRARY ($ROWS_L rows)"
+  echo "  System info     : results/system_info.txt"
   echo ""
   echo "  Benchmark types:"
-  echo "    library — standard default parameters (K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
-  echo "    custom  — user-selected parameters"
-  echo ""
-  echo "  CSV columns:"
-  echo "    backend, algorithm, base, K, L, eta, tau, beta,"
-  echo "    gamma1_bits, gamma2_div, omega, ctildebytes,"
-  echo "    type, operation, correctness, iterations,"
-  echo "    mean_ns, median_ns, min_ns, max_ns,"
-  echo "    stddev_ns, p95_ns, p99_ns, ops_per_sec,"
-  echo "    pk_bytes, sk_bytes, sig_bytes"
+  echo "    $CSV_CUSTOM  — user-selected parameters"
+  echo "    $CSV_LIBRARY — standard default parameters (K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 else

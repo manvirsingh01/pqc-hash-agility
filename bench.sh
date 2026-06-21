@@ -26,13 +26,15 @@
 # =============================================================================
 set -euo pipefail
 
-ITERS=1000
+ITERS=200
 LITERS=200
-WARMUP=100
+WARMUP=20
 NO_HARAKA=0
 CUSTOM_ONLY=0
 DEFAULT_ONLY=0
 REPO="$(cd "$(dirname "$0")" && pwd)"
+RESULTS_DIR="$(pwd)/results"
+mkdir -p "$RESULTS_DIR"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -58,13 +60,13 @@ echo " Custom iters  : $ITERS  (per operation)"
 echo " Default iters : $LITERS (per operation)"
 echo " Warmup        : $WARMUP"
 echo " Output:"
-echo "   custom_benchmark.csv           — our 6 backends × 6 algorithms"
-echo "   library_default_benchmark.csv  — all liboqs built-in algorithms"
+echo "   results/custom_benchmark.csv           — our 6 backends × 6 algorithms"
+echo "   results/library_default_benchmark.csv  — all liboqs built-in algorithms"
 echo "========================================================="
 echo ""
 
 # ── Generate system info ──
-bash "$REPO/system_info.sh" system_info.txt
+bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 echo ""
 
 # ── Optional: pin CPU to performance governor (reduces timing jitter) ──
@@ -84,7 +86,7 @@ echo ""
 if [ "$DEFAULT_ONLY" = "0" ]; then
 
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " CSV 1/2: custom_benchmark.csv"
+  echo " CSV 1/2: results/custom_benchmark.csv"
   echo " (our forked PQClean backends, correctness + timing)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
@@ -98,7 +100,7 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
     NO_HARAKA=1
   fi
 
-  rm -f custom_benchmark.csv
+  rm -f "$RESULTS_DIR/custom_benchmark.csv"
 
   echo "--- [1/6] SHAKE  (FIPS-approved SHAKE/SHA-3, liboqs built-in) ---"
   ./bench_shake \
@@ -145,12 +147,11 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
     echo "--- [6/6] Haraka  SKIPPED ---"
   fi
 
-  # Rename pqc_benchmark_results.csv → custom_benchmark.csv
-  [ -f pqc_benchmark_results.csv ] && mv pqc_benchmark_results.csv custom_benchmark.csv
+  [ -f pqc_benchmark_results.csv ] && mv pqc_benchmark_results.csv "$RESULTS_DIR/custom_benchmark.csv"
 
-  CUSTOM_ROWS=$(wc -l < custom_benchmark.csv 2>/dev/null || echo 0)
+  CUSTOM_ROWS=$(wc -l < "$RESULTS_DIR/custom_benchmark.csv" 2>/dev/null || echo 0)
   echo ""
-  echo "✓ custom_benchmark.csv  —  $CUSTOM_ROWS rows (incl. header)"
+  echo "✓ results/custom_benchmark.csv  —  $CUSTOM_ROWS rows (incl. header)"
 
 fi  # end CSV 1
 
@@ -161,7 +162,7 @@ if [ "$CUSTOM_ONLY" = "0" ]; then
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " CSV 2/2: library_default_benchmark.csv"
+  echo " CSV 2/2: results/library_default_benchmark.csv"
   echo " (all 6 backends × 6 algorithms via OQS API, correctness + timing)"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo ""
@@ -176,11 +177,11 @@ if [ "$CUSTOM_ONLY" = "0" ]; then
   ./liboqs_bench \
     --iters  "$LITERS" \
     --warmup "$WARMUP" \
-    --csv    library_default_benchmark.csv
+    --csv    "$RESULTS_DIR/library_default_benchmark.csv"
 
-  DEFAULT_ROWS=$(wc -l < library_default_benchmark.csv 2>/dev/null || echo 0)
+  DEFAULT_ROWS=$(wc -l < "$RESULTS_DIR/library_default_benchmark.csv" 2>/dev/null || echo 0)
   echo ""
-  echo "✓ library_default_benchmark.csv  —  $DEFAULT_ROWS rows (incl. header)"
+  echo "✓ results/library_default_benchmark.csv  —  $DEFAULT_ROWS rows (incl. header)"
 
 fi  # end CSV 2
 
@@ -190,7 +191,7 @@ echo "========================================================="
 echo " DONE"
 echo ""
 if [ "$DEFAULT_ONLY" = "0" ]; then
-  echo " custom_benchmark.csv"
+  echo " results/custom_benchmark.csv"
   echo "   Columns: algorithm, operation, hash_backend, keccak_rounds,"
   echo "            fips_compliant, median_cycles, cpb, wall_ns_mean,"
   echo "            wall_ns_median, wall_ns_min, wall_ns_max, wall_ns_stddev,"
@@ -198,7 +199,7 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
   echo ""
 fi
 if [ "$CUSTOM_ONLY" = "0" ]; then
-  echo " library_default_benchmark.csv"
+  echo " results/library_default_benchmark.csv"
   echo "   Columns: backend, algorithm, type, operation,"
   echo "            correctness, iterations,"
   echo "            mean_ns, median_ns, min_ns, max_ns,"

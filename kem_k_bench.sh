@@ -9,24 +9,34 @@
 # Research:        k=1, k=5..8 (non-standard module ranks)
 #
 # Recompiles ML-KEM with that k value and benchmarks keygen/encaps/decaps.
-# Results go to kem_k_benchmark.csv.
+# Generates BOTH benchmark types:
+#   custom  — user-selected k values
+#   library — standard default (k=2, ML-KEM-512 baseline)
+#
+# Output (in results/ directory):
+#   custom_kem_k_benchmark.csv
+#   library_default_kem_k_benchmark.csv
 
 set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(pwd)"
-ITERS=1000
-WARMUP=100
-CSV="kem_k_benchmark.csv"
+RESULTS_DIR="$ROOT/results"
+mkdir -p "$RESULTS_DIR"
+ITERS=200
+WARMUP=20
+DEF_K=2
 
 for i in "$@"; do
   case "$i" in
     --iters)   shift; ITERS="$1"; shift ;;
     --warmup)  shift; WARMUP="$1"; shift ;;
-    --csv)     shift; CSV="$1"; shift ;;
     *) ;;
   esac
 done
+
+CSV_CUSTOM="custom_kem_k_benchmark.csv"
+CSV_LIBRARY="library_default_kem_k_benchmark.csv"
 
 ARCH="$(uname -m)"
 PQCLEAN="$ROOT/PQClean"
@@ -51,7 +61,7 @@ for f in "$OQS_STATIC" "$XKCP_LIB"; do
 done
 
 # ── Generate system info ──
-bash "$REPO/system_info.sh" system_info.txt
+bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
 # ── k-value parameter lookup ──
 get_eta1()    { [ "$1" -le 2 ] && echo 3 || echo 2; }
@@ -77,6 +87,8 @@ echo "║   ML-KEM Variable-k Benchmark                      ║"
 echo "║                                                     ║"
 echo "║   Choose a hash backend and k value to benchmark    ║"
 echo "║   ML-KEM with custom module rank (k=1..8)          ║"
+echo "║                                                     ║"
+echo "║   Generates both custom and library benchmarks.     ║"
 echo "╚══════════════════════════════════════════════════════╝"
 echo ""
 echo "  Hash backends:"
@@ -117,21 +129,29 @@ for k in "${K_VALUES[@]}"; do
   fi
 done
 
+CUSTOM_TOTAL=$(( ${#K_VALUES[@]} * ${#BACKENDS[@]} ))
+LIBRARY_TOTAL=${#BACKENDS[@]}
+TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
+
 echo ""
 echo "  ─────────────────────────────────────────────"
-echo "  Backends   : ${BACKENDS[*]}"
-echo "  k values   : ${K_VALUES[*]}"
-echo "  Iterations : $ITERS"
-echo "  Warmup     : $WARMUP"
-echo "  Output CSV : $CSV"
+echo "  Backends     : ${BACKENDS[*]}"
+echo "  k values     : ${K_VALUES[*]}"
+echo "  Library runs : $LIBRARY_TOTAL (default k=$DEF_K per backend)"
+echo "  Custom runs  : $CUSTOM_TOTAL"
+echo "  Total runs   : $TOTAL"
+echo "  Iterations   : $ITERS"
+echo "  Warmup       : $WARMUP"
+echo "  Custom CSV   : $CSV_CUSTOM"
+echo "  Library CSV  : $CSV_LIBRARY"
 echo "  ─────────────────────────────────────────────"
 echo ""
 read -rp "  Press ENTER to start... "
 
-# ── CSV header ──
-if [ ! -f "$CSV" ]; then
-  echo "backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits" > "$CSV"
-fi
+# ── CSV headers ──
+KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits"
+echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
 KBUILD="$ROOT/.kem_k_build"
 mkdir -p "$KBUILD"
@@ -143,60 +163,53 @@ COMMON_OBJS="$KBUILD/fips202.o $KBUILD/randombytes.o"
 gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$KBUILD/fips202.o" "$COMMON_DIR/fips202.c"
 gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$KBUILD/randombytes.o" "$COMMON_DIR/randombytes.c"
 
-# ── Main loop ──
-for K in "${K_VALUES[@]}"; do
-  ETA1=$(get_eta1 "$K")
-  ETA2=$(get_eta2 "$K")
-  POLYCOMP=$(get_polycomp "$K")
-  PVCOMP_K=$(get_pvcomp_k "$K")
-  DU=$(get_du "$K")
-  DV=$(get_dv "$K")
+# ── Compile + benchmark function ──
+run_k_bench() {
+  local K=$1 BACKEND=$2 BENCH_TYPE=$3
 
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  k=$K  ETA1=$ETA1  ETA2=$ETA2  du=$DU  dv=$DV"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  local ETA1=$(get_eta1 "$K")
+  local ETA2=$(get_eta2 "$K")
+  local POLYCOMP=$(get_polycomp "$K")
+  local PVCOMP_K=$(get_pvcomp_k "$K")
+  local DU=$(get_du "$K")
+  local DV=$(get_dv "$K")
+  local TEMPLATE=$(get_template "$K")
 
-  TEMPLATE=$(get_template "$K")
+  # Source directory
+  local SRC_DIR
+  if [ "$BACKEND" = "shake" ]; then
+    SRC_DIR="$PQCLEAN/crypto_kem/$TEMPLATE/clean"
+  else
+    SRC_DIR="$PQCLEAN/crypto_kem/$TEMPLATE/$BACKEND"
+  fi
 
-  for BACKEND in "${BACKENDS[@]}"; do
-    echo ""
-    echo "  ── $BACKEND / k=$K ──"
+  if [ ! -d "$SRC_DIR" ]; then
+    echo "  [SKIP] $SRC_DIR not found"
+    return
+  fi
 
-    # Source directory
-    if [ "$BACKEND" = "shake" ]; then
-      SRC_DIR="$PQCLEAN/crypto_kem/$TEMPLATE/clean"
-    else
-      SRC_DIR="$PQCLEAN/crypto_kem/$TEMPLATE/$BACKEND"
-    fi
+  # Build directory
+  local VDIR="$KBUILD/k${K}-${BACKEND}-${BENCH_TYPE}"
+  rm -rf "$VDIR"
+  mkdir -p "$VDIR"
+  cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
 
-    if [ ! -d "$SRC_DIR" ]; then
-      echo "  [SKIP] $SRC_DIR not found"
-      continue
-    fi
+  # Get the function name prefix from the copied api.h
+  local PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_kem_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_kem_keypair//' || echo "")
+  if [ -z "$PREFIX" ]; then
+    echo "  [SKIP] Cannot detect function prefix from api.h"
+    return
+  fi
 
-    # Build directory
-    VDIR="$KBUILD/k${K}-${BACKEND}"
-    rm -rf "$VDIR"
-    mkdir -p "$VDIR"
-    cp "$SRC_DIR"/*.c "$SRC_DIR"/*.h "$VDIR/" 2>/dev/null || true
+  # Compute key/ct sizes for this k
+  local POLYVEC_BYTES=$((K * 384))
+  local PK_BYTES=$((POLYVEC_BYTES + 32))
+  local SK_BYTES=$((POLYVEC_BYTES + PK_BYTES + 64))
+  local PVCOMP_BYTES=$((K * PVCOMP_K))
+  local CT_BYTES=$((PVCOMP_BYTES + POLYCOMP))
 
-    # Get the function name prefix from the copied api.h
-    PREFIX=$(grep -o 'PQCLEAN_[A-Z0-9_]*_crypto_kem_keypair' "$VDIR/api.h" 2>/dev/null | head -1 | sed 's/_crypto_kem_keypair//' || echo "")
-    if [ -z "$PREFIX" ]; then
-      echo "  [SKIP] Cannot detect function prefix from api.h"
-      continue
-    fi
-
-    # Compute key/ct sizes for this k
-    POLYVEC_BYTES=$((K * 384))
-    PK_BYTES=$((POLYVEC_BYTES + 32))
-    SK_BYTES=$((POLYVEC_BYTES + PK_BYTES + 64))
-    PVCOMP_BYTES=$((K * PVCOMP_K))
-    CT_BYTES=$((PVCOMP_BYTES + POLYCOMP))
-
-    # Patch params.h with the desired k value
-    cat > "$VDIR/params.h" << PEOF
+  # Patch params.h with the desired k value
+  cat > "$VDIR/params.h" << PEOF
 #ifndef PARAMS_K${K}_H
 #define PARAMS_K${K}_H
 
@@ -225,8 +238,8 @@ for K in "${K_VALUES[@]}"; do
 #endif
 PEOF
 
-    # Patch api.h — replace hardcoded sizes with computed values for this k
-    cat > "$VDIR/api.h" << AEOF
+  # Patch api.h — replace hardcoded sizes with computed values for this k
+  cat > "$VDIR/api.h" << AEOF
 #ifndef API_K${K}_H
 #define API_K${K}_H
 #include <stdint.h>
@@ -244,30 +257,30 @@ int ${PREFIX}_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 #endif
 AEOF
 
-    # CFLAGS
-    CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+  # CFLAGS
+  local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
-    # Compile all variant .c to .o
-    OBJ_FILES=""
-    COMPILE_OK=1
-    for SRC_FILE in "$VDIR"/*.c; do
-      OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
-      if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
-        echo "  [ERROR] compile $(basename "$SRC_FILE")"
-        COMPILE_OK=0
-        break
-      fi
-      OBJ_FILES="$OBJ_FILES $OBJ"
-    done
-    [ "$COMPILE_OK" = "1" ] || continue
+  # Compile all variant .c to .o
+  local OBJ_FILES=""
+  local COMPILE_OK=1
+  for SRC_FILE in "$VDIR"/*.c; do
+    local OBJ="$VDIR/$(basename "$SRC_FILE" .c).o"
+    if ! gcc $CFLAGS_V -c -o "$OBJ" "$SRC_FILE" 2>&1; then
+      echo "  [ERROR] compile $(basename "$SRC_FILE")"
+      COMPILE_OK=0
+      break
+    fi
+    OBJ_FILES="$OBJ_FILES $OBJ"
+  done
+  [ "$COMPILE_OK" = "1" ] || return
 
-    # Create static library
-    LIB="$VDIR/libmlkem_k${K}_${BACKEND}.a"
-    ar rcs "$LIB" $OBJ_FILES
+  # Create static library
+  local LIB="$VDIR/libmlkem_k${K}_${BACKEND}.a"
+  ar rcs "$LIB" $OBJ_FILES
 
-    # Write the benchmark driver
-    BENCH_C="$VDIR/bench_k.c"
-    cat > "$BENCH_C" << 'BENCHEOF'
+  # Write the benchmark driver
+  local BENCH_C="$VDIR/bench_k.c"
+  cat > "$BENCH_C" << 'BENCHEOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -305,17 +318,19 @@ static Stats compute(uint64_t *s, int n) {
 
 BENCHEOF
 
-    # Append the main function with actual function names substituted
-    cat >> "$BENCH_C" << MAINEOF
+  # Append the main function with actual function names substituted
+  cat >> "$BENCH_C" << MAINEOF
 int main(int argc, char **argv) {
     int iters=1000,warmup=100;
     const char *csv=NULL,*backend="unknown";
+    const char *bench_type = "custom";
 
     for(int i=1;i<argc;i++){
         if(!strcmp(argv[i],"--iters")&&i+1<argc) iters=atoi(argv[++i]);
         else if(!strcmp(argv[i],"--warmup")&&i+1<argc) warmup=atoi(argv[++i]);
         else if(!strcmp(argv[i],"--csv")&&i+1<argc) csv=argv[++i];
         else if(!strcmp(argv[i],"--backend")&&i+1<argc) backend=argv[++i];
+        else if(!strcmp(argv[i],"--type")&&i+1<argc) bench_type=argv[++i];
     }
 
     int k_val = KYBER_K;
@@ -335,8 +350,8 @@ int main(int argc, char **argv) {
 
     char algo[32];
     snprintf(algo,sizeof(algo),"ML-KEM-k%d",k_val);
-    printf("  %-12s %-16s %s  (pk=%d sk=%d ct=%d ss=%d)\n",
-           backend,algo,correct,
+    printf("  %-12s %-16s %s  [%s]  (pk=%d sk=%d ct=%d ss=%d)\n",
+           backend,algo,correct,bench_type,
            ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
            ${PREFIX}_CRYPTO_SECRETKEYBYTES,
            ${PREFIX}_CRYPTO_CIPHERTEXTBYTES,
@@ -365,11 +380,11 @@ int main(int argc, char **argv) {
         Stats st=compute(ts,iters);
         printf("    %-8s  median=%"PRIu64"ns  ops/s=%.1f\n",ops[op],st.median,st.ops);
         if(fp){
-            fprintf(fp,"%s,%d,%s,KEM,%s,%s,%d,"
+            fprintf(fp,"%s,%d,%s,%s,%s,%s,%d,"
                 "%"PRIu64",%"PRIu64",%"PRIu64",%"PRIu64","
                 "%"PRIu64",%"PRIu64",%"PRIu64","
                 "%.2f,%d,%d,%d,%d,%d,%d,%d,%d\n",
-                backend,k_val,algo,ops[op],correct,iters,
+                backend,k_val,algo,bench_type,ops[op],correct,iters,
                 st.mean,st.median,st.mn,st.mx,st.sd,st.p95,st.p99,st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
@@ -384,28 +399,100 @@ int main(int argc, char **argv) {
 }
 MAINEOF
 
-    # Compile and link the benchmark
-    BENCH_BIN="$VDIR/bench_k"
+  # Compile and link the benchmark
+  local BENCH_BIN="$VDIR/bench_k"
+  local LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
 
-    LINK_LIBS="$LIB $COMMON_OBJS $BLAKE3_DIR/libblake3.a $HARAKA_DIR/libharaka.a $XKCP_LIB $OQS_STATIC -lcrypto -lm"
+  if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
+    echo "  [ERROR] link failed"
+    return
+  fi
 
-    if ! gcc $CFLAGS_V -o "$BENCH_BIN" "$BENCH_C" $LINK_LIBS 2>&1; then
-      echo "  [ERROR] link failed"
-      continue
-    fi
+  echo "  [OK] Running benchmark..."
+  local CSV_FILE
+  if [ "$BENCH_TYPE" = "library" ]; then
+    CSV_FILE="$CSV_LIBRARY"
+  else
+    CSV_FILE="$CSV_CUSTOM"
+  fi
+  "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --type "$BENCH_TYPE"
+}
 
-    echo "  [OK] Running benchmark..."
-    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$ROOT/$CSV" --backend "$BACKEND"
+COMBO=0
 
+# ── Phase 1: Library benchmark (standard default k=2) ──
+echo ""
+echo "═══════════════════════════════════════════════════════"
+echo "  Phase 1: Library (default k=$DEF_K)"
+echo "═══════════════════════════════════════════════════════"
+
+DEF_ETA1=$(get_eta1 "$DEF_K")
+DEF_ETA2=$(get_eta2 "$DEF_K")
+DEF_DU=$(get_du "$DEF_K")
+DEF_DV=$(get_dv "$DEF_K")
+DEF_PK=$((384 * DEF_K + 32))
+DEF_SK=$((768 * DEF_K + 96))
+DEF_POLYCOMP=$(get_polycomp "$DEF_K")
+DEF_PVCOMP_K=$(get_pvcomp_k "$DEF_K")
+DEF_CT=$((DEF_K * DEF_PVCOMP_K + DEF_POLYCOMP))
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  k=$DEF_K  ETA1=$DEF_ETA1  ETA2=$DEF_ETA2  du=$DEF_DU  dv=$DEF_DV  [library default]"
+echo "  PK=${DEF_PK}B  SK=${DEF_SK}B  CT=${DEF_CT}B"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+for BACKEND in "${BACKENDS[@]}"; do
+  COMBO=$((COMBO + 1))
+  echo ""
+  echo "  [$COMBO/$TOTAL] $BACKEND / k=$DEF_K [library]"
+  run_k_bench "$DEF_K" "$BACKEND" "library"
+done
+
+# ── Phase 2: Custom benchmark (user-selected k values) ──
+echo ""
+echo "═══════════════════════════════════════════════════════"
+echo "  Phase 2: Custom (user-selected k values)"
+echo "═══════════════════════════════════════════════════════"
+
+for K in "${K_VALUES[@]}"; do
+  ETA1=$(get_eta1 "$K")
+  ETA2=$(get_eta2 "$K")
+  DU=$(get_du "$K")
+  DV=$(get_dv "$K")
+  POLYCOMP=$(get_polycomp "$K")
+  PVCOMP_K=$(get_pvcomp_k "$K")
+  PK_BYTES=$((384 * K + 32))
+  SK_BYTES=$((768 * K + 96))
+  CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  k=$K  ETA1=$ETA1  ETA2=$ETA2  du=$DU  dv=$DV  [custom]"
+  echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  for BACKEND in "${BACKENDS[@]}"; do
+    COMBO=$((COMBO + 1))
+    echo ""
+    echo "  [$COMBO/$TOTAL] $BACKEND / k=$K [custom]"
+    run_k_bench "$K" "$BACKEND" "custom"
   done
 done
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  DONE"
+echo "  ML-KEM Variable-k Benchmark DONE"
 echo ""
-echo "  Results    : $CSV"
-echo "  System info: system_info.txt"
+ROWS_C=$(wc -l < "$RESULTS_DIR/$CSV_CUSTOM" 2>/dev/null || echo 0)
+ROWS_L=$(wc -l < "$RESULTS_DIR/$CSV_LIBRARY" 2>/dev/null || echo 0)
+echo "  Custom results  : results/$CSV_CUSTOM ($ROWS_C rows)"
+echo "  Library results : results/$CSV_LIBRARY ($ROWS_L rows)"
+echo "  System info     : results/system_info.txt"
+echo ""
+echo "  Benchmark types:"
+echo "    $CSV_CUSTOM  — user-selected parameters (k=${K_VALUES[*]})"
+echo "    $CSV_LIBRARY — standard default parameters (k=$DEF_K)"
 echo ""
 echo "  CSV columns:"
 echo "    backend, k_value, algorithm, type, operation,"
