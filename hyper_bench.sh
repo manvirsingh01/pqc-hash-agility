@@ -227,8 +227,8 @@ if [ "$FAMILY" = "1" ]; then
   read -rp "  Press ENTER to start... "
 
   KEM_HEADER="backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes"
-  echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
-  echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
+  [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+  [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
   # ── KEM compile + benchmark function ──
   run_kem_bench() {
@@ -665,8 +665,8 @@ elif [ "$FAMILY" = "2" ]; then
   read -rp "  Press ENTER to start... "
 
   DSA_HEADER="backend,algorithm,base,K,L,eta,tau,beta,gamma1_bits,gamma2_div,omega,ctildebytes,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,sig_bytes"
-  echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
-  echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
+  [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+  [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
   DSA_Q=8380417
 

@@ -150,8 +150,8 @@ read -rp "  Press ENTER to start... "
 
 # ── CSV headers ──
 KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits"
-echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
-echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
+[ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
+[ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
 KBUILD="$ROOT/.kem_k_build"
 mkdir -p "$KBUILD"
