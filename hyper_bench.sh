@@ -213,17 +213,15 @@ if [ "$FAMILY" = "1" ]; then
 
   select_backends
 
-  CUSTOM_TOTAL=$(( ${#K_VALUES[@]} * ${#BACKENDS[@]} ))
-  LIBRARY_TOTAL=${#BACKENDS[@]}
-  TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
+  RUNS_PER_K=$(( ${#BACKENDS[@]} * 2 ))
+  TOTAL=$(( ${#K_VALUES[@]} * RUNS_PER_K ))
   echo ""
   echo "  ───────────────────────────────────────────"
   echo "  Family       : ML-KEM"
   echo "  Profile      : $PROF_LABEL"
   echo "  k values     : ${K_VALUES[*]}"
   echo "  Backends     : ${BACKENDS[*]}"
-  echo "  Library runs : $LIBRARY_TOTAL (default k=$DEF_K per backend)"
-  echo "  Custom runs  : $CUSTOM_TOTAL"
+  echo "  Per k value  : ${#BACKENDS[@]} library + ${#BACKENDS[@]} custom"
   echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
@@ -469,47 +467,29 @@ MAINEOF
 
   COMBO=0
 
-  # ── Phase 1: Library benchmark (standard default parameters) ──
-  echo ""
-  echo "═══════════════════════════════════════════════════════════"
-  echo "  Phase 1: Library (default k=$DEF_K)"
-  echo "═══════════════════════════════════════════════════════════"
-
-  K=$DEF_K
-  PK_BYTES=$((384 * K + 32))
-  SK_BYTES=$((768 * K + 96))
-  CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
-
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV  [library default]"
-  echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-  for BACKEND in "${BACKENDS[@]}"; do
-    COMBO=$((COMBO + 1))
-    echo ""
-    echo "  [$COMBO/$TOTAL] $BACKEND / k=$K / profile $PROFILE [library]"
-    run_kem_bench "$DEF_K" "$BACKEND" "library"
-  done
-
-  # ── Phase 2: Custom benchmark (user-selected parameters) ──
-  echo ""
-  echo "═══════════════════════════════════════════════════════════"
-  echo "  Phase 2: Custom (user-selected k values)"
-  echo "═══════════════════════════════════════════════════════════"
-
+  # ── Benchmark each k: library + custom for every k value ──
   for K in "${K_VALUES[@]}"; do
     PK_BYTES=$((384 * K + 32))
     SK_BYTES=$((768 * K + 96))
     CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
 
     echo ""
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV  [custom]"
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  ML-KEM  k=$K  eta1=$ETA1  du=$DU  dv=$DV  profile=$PROFILE"
     echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "═══════════════════════════════════════════════════════════"
 
+    echo ""
+    echo "  ── Library (standard defaults) for k=$K ──"
+    for BACKEND in "${BACKENDS[@]}"; do
+      COMBO=$((COMBO + 1))
+      echo ""
+      echo "  [$COMBO/$TOTAL] $BACKEND / k=$K / profile $PROFILE [library]"
+      run_kem_bench "$K" "$BACKEND" "library"
+    done
+
+    echo ""
+    echo "  ── Custom (user-selected) for k=$K ──"
     for BACKEND in "${BACKENDS[@]}"; do
       COMBO=$((COMBO + 1))
       echo ""
@@ -529,8 +509,8 @@ MAINEOF
   echo "  System info     : results/system_info.txt"
   echo ""
   echo "  Benchmark types:"
-  echo "    $CSV_CUSTOM  — user-selected parameters (k=${K_VALUES[*]})"
-  echo "    $CSV_LIBRARY — standard default parameters (k=$DEF_K)"
+  echo "    $CSV_CUSTOM  — custom benchmarks (k=${K_VALUES[*]})"
+  echo "    $CSV_LIBRARY — library default benchmarks (k=${K_VALUES[*]})"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
@@ -649,8 +629,7 @@ elif [ "$FAMILY" = "2" ]; then
   select_backends
 
   CUSTOM_TOTAL=$(( ${#K_DSA_VALUES[@]} * ${#L_DSA_VALUES[@]} * ${#TAU_VALUES[@]} * ${#OMEGA_VALUES[@]} * ${#BACKENDS[@]} ))
-  LIBRARY_TOTAL=${#BACKENDS[@]}
-  TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
+  TOTAL=$(( CUSTOM_TOTAL * 2 ))
   echo ""
   echo "  ───────────────────────────────────────────"
   echo "  Family       : ML-DSA"
@@ -660,8 +639,7 @@ elif [ "$FAMILY" = "2" ]; then
   echo "  tau values   : ${TAU_VALUES[*]}"
   echo "  omega values : ${OMEGA_VALUES[*]}"
   echo "  Backends     : ${BACKENDS[*]}"
-  echo "  Library runs : $LIBRARY_TOTAL (default K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
-  echo "  Custom runs  : $CUSTOM_TOTAL"
+  echo "  Per combo    : library + custom (both with same params)"
   echo "  Total runs   : $TOTAL"
   echo "  Iterations   : $ITERS"
   echo "  Warmup       : $WARMUP"
@@ -968,37 +946,7 @@ MAINEOF
 
   COMBO=0
 
-  # ── Phase 1: Library benchmark (standard default parameters) ──
-  echo ""
-  echo "═══════════════════════════════════════════════════════════"
-  echo "  Phase 1: Library (default K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
-  echo "═══════════════════════════════════════════════════════════"
-
-  DEF_BETA_D=$((DEF_TAU_D * DSA_ETA))
-  DEF_PK_D=$((32 + DEF_K_D * 320))
-  DEF_SK_D=$((128 + (DEF_K_D + DEF_L_D) * DSA_POLYETA + DEF_K_D * 416))
-  DEF_POLYVECH_D=$((DEF_OMEGA_D + DEF_K_D))
-  DEF_SIG_D=$((DSA_CTILDE + DEF_L_D * DSA_POLYZ + DEF_POLYVECH_D))
-
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  ML-DSA  K=$DEF_K_D  L=$DEF_L_D  tau=$DEF_TAU_D  omega=$DEF_OMEGA_D  beta=$DEF_BETA_D  [library default]"
-  echo "  PK=${DEF_PK_D}B  SK=${DEF_SK_D}B  SIG=${DEF_SIG_D}B"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-  for BACKEND in "${BACKENDS[@]}"; do
-    COMBO=$((COMBO + 1))
-    echo ""
-    echo "  [$COMBO/$TOTAL] $BACKEND / K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D [library]"
-    run_dsa_bench "$DEF_K_D" "$DEF_L_D" "$DEF_TAU_D" "$DEF_OMEGA_D" "$BACKEND" "library"
-  done
-
-  # ── Phase 2: Custom benchmark (user-selected parameters) ──
-  echo ""
-  echo "═══════════════════════════════════════════════════════════"
-  echo "  Phase 2: Custom (user-selected parameters)"
-  echo "═══════════════════════════════════════════════════════════"
-
+  # ── Benchmark each param combo: library + custom for every combination ──
   for K_D in "${K_DSA_VALUES[@]}"; do
     for L_D in "${L_DSA_VALUES[@]}"; do
       for TAU_D in "${TAU_VALUES[@]}"; do
@@ -1019,11 +967,22 @@ MAINEOF
           SIG_D=$((DSA_CTILDE + L_D * DSA_POLYZ + POLYVECH_D))
 
           echo ""
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  ML-DSA  K=$K_D  L=$L_D  tau=$TAU_D  omega=$OMEGA_D  beta=$BETA_D  [custom]"
+          echo "═══════════════════════════════════════════════════════════"
+          echo "  ML-DSA  K=$K_D  L=$L_D  tau=$TAU_D  omega=$OMEGA_D  beta=$BETA_D"
           echo "  PK=${PK_D}B  SK=${SK_D}B  SIG=${SIG_D}B"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "═══════════════════════════════════════════════════════════"
 
+          echo ""
+          echo "  ── Library (standard defaults) ──"
+          for BACKEND in "${BACKENDS[@]}"; do
+            COMBO=$((COMBO + 1))
+            echo ""
+            echo "  [$COMBO/$TOTAL] $BACKEND / K=$K_D L=$L_D tau=$TAU_D omega=$OMEGA_D [library]"
+            run_dsa_bench "$K_D" "$L_D" "$TAU_D" "$OMEGA_D" "$BACKEND" "library"
+          done
+
+          echo ""
+          echo "  ── Custom (user-selected) ──"
           for BACKEND in "${BACKENDS[@]}"; do
             COMBO=$((COMBO + 1))
             echo ""
@@ -1045,9 +1004,9 @@ MAINEOF
   echo "  Library results : results/$CSV_LIBRARY ($ROWS_L rows)"
   echo "  System info     : results/system_info.txt"
   echo ""
-  echo "  Benchmark types:"
-  echo "    $CSV_CUSTOM  — user-selected parameters"
-  echo "    $CSV_LIBRARY — standard default parameters (K=$DEF_K_D L=$DEF_L_D tau=$DEF_TAU_D omega=$DEF_OMEGA_D)"
+  echo "  Benchmark types (both run with same parameters):"
+  echo "    $CSV_CUSTOM  — custom benchmarks"
+  echo "    $CSV_LIBRARY — library default benchmarks"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 else

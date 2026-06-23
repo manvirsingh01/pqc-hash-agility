@@ -129,16 +129,14 @@ for k in "${K_VALUES[@]}"; do
   fi
 done
 
-CUSTOM_TOTAL=$(( ${#K_VALUES[@]} * ${#BACKENDS[@]} ))
-LIBRARY_TOTAL=${#BACKENDS[@]}
-TOTAL=$((LIBRARY_TOTAL + CUSTOM_TOTAL))
+RUNS_PER_K=$(( ${#BACKENDS[@]} * 2 ))
+TOTAL=$(( ${#K_VALUES[@]} * RUNS_PER_K ))
 
 echo ""
 echo "  ─────────────────────────────────────────────"
 echo "  Backends     : ${BACKENDS[*]}"
 echo "  k values     : ${K_VALUES[*]}"
-echo "  Library runs : $LIBRARY_TOTAL (default k=$DEF_K per backend)"
-echo "  Custom runs  : $CUSTOM_TOTAL"
+echo "  Per k value  : ${#BACKENDS[@]} library + ${#BACKENDS[@]} custom"
 echo "  Total runs   : $TOTAL"
 echo "  Iterations   : $ITERS"
 echo "  Warmup       : $WARMUP"
@@ -434,41 +432,7 @@ MAINEOF
 
 COMBO=0
 
-# ── Phase 1: Library benchmark (standard default k=2) ──
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Phase 1: Library (default k=$DEF_K)"
-echo "═══════════════════════════════════════════════════════"
-
-DEF_ETA1=$(get_eta1 "$DEF_K")
-DEF_ETA2=$(get_eta2 "$DEF_K")
-DEF_DU=$(get_du "$DEF_K")
-DEF_DV=$(get_dv "$DEF_K")
-DEF_PK=$((384 * DEF_K + 32))
-DEF_SK=$((768 * DEF_K + 96))
-DEF_POLYCOMP=$(get_polycomp "$DEF_K")
-DEF_PVCOMP_K=$(get_pvcomp_k "$DEF_K")
-DEF_CT=$((DEF_K * DEF_PVCOMP_K + DEF_POLYCOMP))
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  k=$DEF_K  ETA1=$DEF_ETA1  ETA2=$DEF_ETA2  du=$DEF_DU  dv=$DEF_DV  [library default]"
-echo "  PK=${DEF_PK}B  SK=${DEF_SK}B  CT=${DEF_CT}B"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-for BACKEND in "${BACKENDS[@]}"; do
-  COMBO=$((COMBO + 1))
-  echo ""
-  echo "  [$COMBO/$TOTAL] $BACKEND / k=$DEF_K [library]"
-  run_k_bench "$DEF_K" "$BACKEND" "library"
-done
-
-# ── Phase 2: Custom benchmark (user-selected k values) ──
-echo ""
-echo "═══════════════════════════════════════════════════════"
-echo "  Phase 2: Custom (user-selected k values)"
-echo "═══════════════════════════════════════════════════════"
-
+# ── Benchmark each k value: library + custom for every k ──
 for K in "${K_VALUES[@]}"; do
   ETA1=$(get_eta1 "$K")
   ETA2=$(get_eta2 "$K")
@@ -481,11 +445,24 @@ for K in "${K_VALUES[@]}"; do
   CT_BYTES=$((K * PVCOMP_K + POLYCOMP))
 
   echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  k=$K  ETA1=$ETA1  ETA2=$ETA2  du=$DU  dv=$DV  [custom]"
+  echo "═══════════════════════════════════════════════════════"
+  echo "  k=$K  ETA1=$ETA1  ETA2=$ETA2  du=$DU  dv=$DV"
   echo "  PK=${PK_BYTES}B  SK=${SK_BYTES}B  CT=${CT_BYTES}B"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "═══════════════════════════════════════════════════════"
 
+  # ── Library benchmark for this k ──
+  echo ""
+  echo "  ── Library (standard defaults) for k=$K ──"
+  for BACKEND in "${BACKENDS[@]}"; do
+    COMBO=$((COMBO + 1))
+    echo ""
+    echo "  [$COMBO/$TOTAL] $BACKEND / k=$K [library]"
+    run_k_bench "$K" "$BACKEND" "library"
+  done
+
+  # ── Custom benchmark for this k ──
+  echo ""
+  echo "  ── Custom (user-selected) for k=$K ──"
   for BACKEND in "${BACKENDS[@]}"; do
     COMBO=$((COMBO + 1))
     echo ""
@@ -505,8 +482,8 @@ echo "  Library results : results/$CSV_LIBRARY ($ROWS_L rows)"
 echo "  System info     : results/system_info.txt"
 echo ""
 echo "  Benchmark types:"
-echo "    $CSV_CUSTOM  — user-selected parameters (k=${K_VALUES[*]})"
-echo "    $CSV_LIBRARY — standard default parameters (k=$DEF_K)"
+echo "    $CSV_CUSTOM  — custom benchmarks (k=${K_VALUES[*]})"
+echo "    $CSV_LIBRARY — library default benchmarks (k=${K_VALUES[*]})"
 echo ""
 echo "  CSV columns:"
 echo "    backend, k_value, algorithm, type, operation,"
