@@ -17,6 +17,19 @@ Benchmarks **ML-KEM** (FIPS 203) and **ML-DSA** (FIPS 204) across six hash backe
 
 **Operations benchmarked:** keygen, encaps/decaps (KEM), sign/verify (DSA)
 
+### Algorithm Payloads
+
+| Algorithm | PK (bytes) | SK (bytes) | CT/SIG (bytes) | SS (bytes) | NIST Level |
+|---|---|---|---|---|---|
+| ML-KEM-512 | 800 | 1,632 | 768 | 32 | 1 |
+| ML-KEM-768 | 1,184 | 2,400 | 1,088 | 32 | 3 |
+| ML-KEM-1024 | 1,568 | 3,168 | 1,568 | 32 | 5 |
+| ML-DSA-44 | 1,312 | 2,560 | 2,420 | — | 2 |
+| ML-DSA-65 | 1,952 | 4,032 | 3,309 | — | 3 |
+| ML-DSA-87 | 2,592 | 4,896 | 4,627 | — | 5 |
+
+> **MTU note:** ML-DSA-87 signatures (4,627 bytes) exceed the 1,500-byte Ethernet MTU, requiring IP fragmentation. ML-KEM-1024 ciphertexts (1,568 bytes) fit within MTU.
+
 ---
 
 ## Quick Start
@@ -45,12 +58,16 @@ bash kem_k_bench.sh               # interactive: choose backend + k=1..8
 bash hyper_bench.sh               # interactive: tweak ML-KEM/ML-DSA params
 # Produces: results/custom_*_hyper_benchmark.csv + results/library_default_*_hyper_benchmark.csv
 
-# 7. (Optional) Run controlled benchmark with replication for statistical rigor
+# 7. (Optional) Run PURE benchmark (stock liboqs, no custom backends)
+bash pure_bench.sh
+# Produces: results/pure/pure_benchmark.csv + results/pure/pure_system_info.txt
+
+# 8. (Optional) Run controlled benchmark with replication for statistical rigor
 sudo bash bench_controlled.sh     # 10 rounds, CPU pinned, turbo off
 python3 compute_ci.py             # compute 95% CI and effect sizes
 # Produces: results/summary_with_ci.csv + results/effect_sizes.csv
 
-# 8. (Optional) Run correctness-only tests (no timing)
+# 9. (Optional) Run correctness-only tests (no timing)
 ./bench_shake --correctness-only --trials 1000
 ```
 
@@ -79,6 +96,8 @@ pqc-hash-agility/
 ├── bench.sh                  # run all backends -> two CSV files
 ├── kem_k_bench.sh            # interactive variable-k ML-KEM benchmark
 ├── hyper_bench.sh            # interactive hyperparameter benchmark (KEM + DSA)
+├── pure_bench.sh             # benchmark stock liboqs (no custom backends)
+├── pure_system_info.sh       # system info for the pure benchmark
 ├── bench_controlled.sh       # controlled runner: CPU pinning, replication, CI
 ├── compute_ci.py             # compute 95% CI and effect sizes from replications
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
@@ -101,6 +120,7 @@ pqc-hash-agility/
 │   └── bench/
 │       ├── full_bench.c      # single binary: all backends, correctness + timing
 │       ├── liboqs_bench.c    # all 6 backends via OQS adapter API
+│       ├── pure_bench.c      # stock liboqs only, no custom backends
 │       └── Makefile
 ├── PQClean_custom/           # forked ML-KEM/ML-DSA backend implementations
 │   ├── crypto_kem/
@@ -120,6 +140,9 @@ pqc-hash-agility/
 │   ├── summary_with_ci.csv       # (from compute_ci.py) per-op summary with 95% CI
 │   ├── effect_sizes.csv          # (from compute_ci.py) backend comparisons
 │   ├── replications/             # (from bench_controlled.sh) per-round CSVs
+│   ├── pure/                     # (from pure_bench.sh) stock liboqs benchmark
+│   │   ├── pure_benchmark.csv
+│   │   └── pure_system_info.txt
 │   └── reference_aarch64.csv  # reference run on ARM (Kali Linux, aarch64)
 └── IMPLEMENTATION_GUIDE.md    # full code walkthrough and design rationale
 ```
@@ -242,17 +265,45 @@ Tests the same **6 backends x 6 algorithms** (ML-KEM-512/768/1024 + ML-DSA-44/65
 
 ---
 
+### pure_bench.sh — Pure Stock Implementation Benchmark
+
+Benchmarks ML-KEM and ML-DSA using their **unmodified stock liboqs implementations** — no custom hash backends, no PQClean forks, no parameter tweaks. This is the baseline that shows how the algorithms perform exactly as they ship.
+
+```bash
+bash pure_bench.sh                     # default: 200 iterations, 20 warmup
+bash pure_bench.sh --iters 1000 --warmup 100
+```
+
+Output in `results/pure/`:
+- `pure_benchmark.csv` — 18 rows (6 algorithms x 3 operations)
+- `pure_system_info.txt` — system info + payload sizes + build config
+
+Each algorithm gets a correctness self-test (round-trip + tamper detection) before timing. The CSV includes a `correctness` column (PASS/FAIL).
+
+#### CSV columns (`results/pure/pure_benchmark.csv`)
+
+```
+algorithm, type, operation, correctness, iterations,
+mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns,
+ops_per_sec, pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes,
+nist_level
+```
+
+Use this to compare against the custom-backend results in `custom_benchmark.csv` — the pure benchmark shows what SHAKE performance looks like without any modifications, while the custom benchmark shows the effect of hash-backend substitution.
+
+---
+
 ### kem_k_bench.sh — Variable k-Value ML-KEM Benchmark
 
 Interactive script to benchmark ML-KEM with **non-standard module ranks** (k=1 through k=8).
 
 Standard ML-KEM uses k=2 (ML-KEM-512), k=3 (ML-KEM-768), k=4 (ML-KEM-1024). This script lets you go beyond that range for research purposes.
 
-For each parameter combination, generates **both** benchmark types:
-- **library** — standard default parameters (k=2, ML-KEM-512 baseline)
-- **custom** — user-selected k values
+For each k value, generates **both** benchmark types so you get side-by-side comparison at every k:
+- **library** — standard default parameters for that k
+- **custom** — user-selected parameters for that k
 
-The `type` column in the CSV distinguishes the two, enabling direct performance comparison.
+Standard NIST k values (k=2, 3, 4) are auto-included if not specified, so the k-scaling series is always complete.
 
 ```bash
 bash kem_k_bench.sh
@@ -262,18 +313,17 @@ bash kem_k_bench.sh --iters 500 --warmup 50
 #### How it works
 
 1. Interactive menu to select backend (shake/turboshake/k12/blake3/xoodyak/haraka or ALL)
-2. Enter k values (space-separated, e.g. `1 2 3 4 5 6 7 8`)
-3. **Phase 1 — Library:** benchmarks default k=2 with each selected backend
-4. **Phase 2 — Custom:** for each user-selected k value and backend, the script:
+2. Enter k values (space-separated, e.g. `5 6 7 8` — standard k=2,3,4 auto-added)
+3. For each k value, the script runs **both library and custom** benchmarks:
    - Copies ML-KEM source from the closest standard variant
    - Patches `params.h` with the requested k value and derived parameters
    - Patches `api.h` with computed key/ciphertext sizes
    - Recompiles and links the variant
    - Runs correctness check (keygen -> encaps -> decaps -> memcmp)
    - Times keygen, encaps, decaps
-5. Results written to two separate CSVs in `results/`:
-   - `custom_kem_k_benchmark.csv` — user-selected k values
-   - `library_default_kem_k_benchmark.csv` — standard default (k=2)
+4. Results written to two separate CSVs in `results/`:
+   - `custom_kem_k_benchmark.csv` — all k values (custom type)
+   - `library_default_kem_k_benchmark.csv` — all k values (library type)
 
 #### k-value parameter table
 
@@ -296,10 +346,13 @@ correctness, iterations,
 mean_ns, median_ns, min_ns, max_ns,
 stddev_ns, p95_ns, p99_ns, ops_per_sec,
 pk_bytes, sk_bytes, ct_bytes, ss_bytes,
-eta1, eta2, du_bits, dv_bits
+eta1, eta2, du_bits, dv_bits,
+standard_level, fips_applicable
 ```
 
-The `type` column contains `library` (default k=2 baseline) or `custom` (user-selected k values).
+- `type`: `library` or `custom`
+- `standard_level`: `ML-KEM-512` / `ML-KEM-768` / `ML-KEM-1024` for k=2/3/4, or `non-standard-research-only` for k=1/5-8
+- `fips_applicable`: `1` for standard k values (2,3,4), `0` for research k values
 
 ---
 
@@ -307,11 +360,11 @@ The `type` column contains `library` (default k=2 baseline) or `custom` (user-se
 
 Interactive script to benchmark **ML-KEM** and **ML-DSA** with custom cryptographic hyperparameters. Recompiles PQClean source with patched parameters, runs correctness checks, and produces detailed CSV output.
 
-For each parameter combination, generates **both** benchmark types:
-- **library** — standard default parameters (baseline for comparison)
-- **custom** — user-selected (tweaked) hyperparameters
+For each parameter combination, generates **both** benchmark types at the **same** parameter values — giving side-by-side comparison:
+- **library** — standard default run with those parameters
+- **custom** — user-selected run with those parameters
 
-The `type` column in the CSV distinguishes the two, enabling direct performance comparison between tweaked and default parameters.
+The `type` column in the CSV distinguishes the two.
 
 ```bash
 bash hyper_bench.sh
@@ -333,11 +386,9 @@ k values: 1-8 (standard: 2/3/4; research: 1/5-8).
 
 This lets you explore combinations that `kem_k_bench.sh` doesn't cover — e.g., k=5 with profile A (du=10/dv=4) vs. profile B (du=11/dv=5).
 
-Library defaults per profile: Profile A → k=2 (ML-KEM-512), Profile B → k=4 (ML-KEM-1024).
-
 Output (in `results/`):
-- `custom_kem_hyper_benchmark.csv` — user-selected k values
-- `library_default_kem_hyper_benchmark.csv` — standard default k per profile
+- `custom_kem_hyper_benchmark.csv` — all k values (custom type)
+- `library_default_kem_hyper_benchmark.csv` — all k values (library type)
 
 Columns: `backend, algorithm, profile, k, eta1, eta2, du, dv, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_bytes, ss_bytes`
 
@@ -364,11 +415,9 @@ Tweakable parameters:
 
 beta is auto-computed as `tau * eta`. The script validates that `beta < gamma1` (otherwise signing loops forever).
 
-Library defaults per base: 44-base → K=4 L=4 tau=39 omega=80, 65-base → K=6 L=5 tau=49 omega=55, 87-base → K=8 L=7 tau=60 omega=75.
-
 Output (in `results/`):
-- `custom_dsa_hyper_benchmark.csv` — user-selected parameters
-- `library_default_dsa_hyper_benchmark.csv` — standard default parameters per base
+- `custom_dsa_hyper_benchmark.csv` — all parameter combos (custom type)
+- `library_default_dsa_hyper_benchmark.csv` — all parameter combos (library type)
 
 Columns: `backend, algorithm, base, K, L, eta, tau, beta, gamma1_bits, gamma2_div, omega, ctildebytes, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, sig_bytes`
 
@@ -376,9 +425,9 @@ The `type` column contains `library` (default params) or `custom` (user-selected
 
 ---
 
-### system_info.sh — Hardware Information
+### system_info.sh / pure_system_info.sh — Hardware + Build Information
 
-Generated automatically by `bench.sh`, `kem_k_bench.sh`, and `hyper_bench.sh`. Produces `results/system_info.txt` with:
+Generated automatically by benchmark scripts. Produces `results/system_info.txt` (or `results/pure/pure_system_info.txt`):
 
 | Section | Details |
 |---|---|
@@ -388,6 +437,10 @@ Generated automatically by `bench.sh`, `kem_k_bench.sh`, and `hyper_bench.sh`. P
 | Memory | Total RAM, available RAM |
 | OS/Kernel | Kernel version, OS name, compiler version |
 | Threading | Confirms single-threaded sequential execution, no CPU pinning |
+| Build Matrix | SIMD tier per backend, compiler flags, parity documentation |
+| Algorithm Capabilities | Backend features, algorithm XOF usage |
+| Algorithm Payloads | PK, SK, CT/SIG, SS sizes in bytes per algorithm, NIST level, MTU notes |
+| Active HW Capabilities | Which hardware features the current system actually has |
 
 ---
 
@@ -401,7 +454,7 @@ Generated automatically by `bench.sh`, `kem_k_bench.sh`, and `hyper_bench.sh`. P
 | **Warmup** | `--warmup 20` discards first 20 calls (cache/branch-predictor warm-up) |
 | **Median reported** | Median latency is reported (robust to OS scheduling outliers) |
 | **Static linking** | Binaries statically link `liboqs.a` — no shared-lib lookup overhead |
-| **Same compiler flags** | All backends compiled with `-O3 -march=native` |
+| **Same compiler flags** | All backends compiled with `-O3` at matched scalar tier (no `-march=native` on x86\_64) |
 | **System info captured** | `system_info.txt` records CPU model, cores, frequency, governor, ISA features alongside every benchmark run |
 
 > **Note on CPU frequency:** For the most stable numbers, pin your CPU governor before running:
@@ -452,7 +505,11 @@ Variable number of rows depending on chosen k values and backends. The custom CS
 
 ### `results/custom_*_hyper_benchmark.csv` / `results/library_default_*_hyper_benchmark.csv`
 
-Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. The custom CSV contains user-tweaked parameters; the library CSV contains standard default parameters. The `type` column distinguishes `library` from `custom`, enabling direct performance comparison. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
+Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. The `type` column distinguishes `library` from `custom`. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
+
+### `results/pure/pure_benchmark.csv`
+
+18 rows (6 algorithms x 3 operations). Stock liboqs implementations only — no custom backends. Columns: `algorithm, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes, nist_level`. See [pure_bench.sh](#pure_benchsh--pure-stock-implementation-benchmark) for details.
 
 ---
 
