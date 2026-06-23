@@ -315,7 +315,8 @@ static double rapl_read_uj(void) {
     if (fd < 0) return -1.0;
     char buf[32];
     memset(buf, 0, sizeof(buf));
-    pread(fd, buf, sizeof(buf) - 1, 0);
+    ssize_t n = pread(fd, buf, sizeof(buf) - 1, 0);
+    if (n <= 0) return -1.0;
     return strtod(buf, NULL);
 }
 
