@@ -64,8 +64,10 @@ bash pure_bench.sh
 
 # 8. (Optional) Run controlled benchmark with replication for statistical rigor
 sudo bash bench_controlled.sh     # 10 rounds, CPU pinned, turbo off
-python3 compute_ci.py             # compute 95% CI and effect sizes
-# Produces: results/summary_with_ci.csv + results/effect_sizes.csv
+python3 compute_ci.py --shuffled results/controlled_benchmark.csv
+# Produces: results/controlled_benchmark.csv (single file, all rounds)
+#           results/replications/roundN_*.csv (per-round files)
+#           results/summary_with_ci.csv + results/effect_sizes.csv
 
 # 9. (Optional) Shuffled benchmark — randomised backend order each round
 sudo bash bench_shuffled.sh       # 10 rounds, shuffled order, single CSV
@@ -145,8 +147,9 @@ pqc-hash-agility/
 │   ├── system_info.txt
 │   ├── summary_with_ci.csv       # (from compute_ci.py) per-op summary with 95% CI
 │   ├── effect_sizes.csv          # (from compute_ci.py) backend comparisons
+│   ├── controlled_benchmark.csv   # (from bench_controlled.sh) all rounds, single file
 │   ├── shuffled_benchmark.csv     # (from bench_shuffled.sh) all rounds, single file
-│   ├── replications/             # (from bench_controlled.sh) per-round CSVs
+│   ├── replications/             # (from bench_controlled.sh) per-round CSVs also kept
 │   ├── pure/                     # (from pure_bench.sh) stock liboqs benchmark
 │   │   ├── pure_benchmark.csv
 │   │   └── pure_system_info.txt
@@ -453,7 +456,15 @@ sudo bash bench_controlled.sh --rounds 20 --iters 10000 --core 2
 
 **CPU controls applied:** frequency governor locked to `performance`, Intel turbo boost disabled, process pinned to a single core. 5-second cooldown between rounds.
 
-Output: `results/replications/round1_custom.csv`, `round2_custom.csv`, ... Analyse with `python3 compute_ci.py`.
+Output:
+- **`results/controlled_benchmark.csv`** — single combined file with `round` and `run_order` columns (all rounds in one file for easy analysis)
+- **`results/replications/roundN_*.csv`** — individual per-round files (also kept)
+
+Analyse with:
+```bash
+python3 compute_ci.py --shuffled results/controlled_benchmark.csv   # single file
+python3 compute_ci.py --dir results/replications                     # per-round files
+```
 
 ---
 
@@ -582,9 +593,13 @@ Variable number of rows depending on chosen parameter combinations and backends.
 
 18 rows (6 algorithms x 3 operations). Stock liboqs implementations only — no custom backends. Columns: `algorithm, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes, nist_level`. See [pure_bench.sh](#pure_benchsh--pure-stock-implementation-benchmark) for details.
 
+### `results/controlled_benchmark.csv`
+
+N×108 rows (N rounds × 6 backends × 6 algorithms × 3 operations). Same data as `custom_benchmark.csv` but with multiple rounds in fixed backend order. Extra columns: `round` (1..N), `run_order` (position within that round), `backend_binary` (which binary ran). See [bench_controlled.sh](#bench_controlledsh--controlled-multi-round-benchmark) for details.
+
 ### `results/shuffled_benchmark.csv`
 
-N×108 rows (N rounds × 6 backends × 6 algorithms × 3 operations). Same data as `custom_benchmark.csv` but with multiple rounds and randomised backend order. Extra columns: `round` (1..N), `run_order` (position within that round), `backend_binary` (which binary ran). See [bench_shuffled.sh](#bench_shuffledsh--shuffled-order-multi-round-benchmark) for details.
+Same structure as `controlled_benchmark.csv` but with **randomised** backend order each round. The `run_order` column differs between rounds — use it to detect ordering bias. See [bench_shuffled.sh](#bench_shuffledsh--shuffled-order-multi-round-benchmark) for details.
 
 ---
 
