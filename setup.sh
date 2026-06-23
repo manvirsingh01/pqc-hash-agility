@@ -77,19 +77,17 @@ XKCP_HDRS="$ROOT/XKCP/bin/generic64/libXKCP.a.headers"
 XKCP_LIB="$ROOT/XKCP/bin/generic64/libXKCP.a"
 
 # ── 4. Build liboqs (full build — all ML-KEM + ML-DSA variants) ──────────────
-# On x86_64: build WITHOUT -march=native to force scalar Keccak (no AVX2 dispatch).
-# On aarch64: keep -march=native (needed for NEON assembly); parity is already
-#             matched since XKCP generic64 and liboqs aarch64 are at similar tiers.
+# -march=native: compile for the actual CPU (prevents illegal-instruction crashes)
+# OQS_DIST_BUILD=OFF: disable runtime SIMD dispatch
+# OQS_USE_OPENSSL=OFF: prevent OpenSSL providing optimized Keccak
+# x86_64: disable AVX/AVX2/AVX512 so SHAKE uses scalar Keccak (parity with XKCP)
+#         keep SSE2/AES/BMI/POPCNT (baseline x86_64, needed for correct operation)
+# aarch64: disable aarch64-optimized Kyber assembly (assembler compatibility)
 echo "[4/15] Building liboqs (static + shared, Release)..."
+OQS_CFLAGS="-O3 -march=native"
 if [ "$ARCH" = "x86_64" ]; then
-  OQS_CFLAGS="-O3"
-  # Explicitly disable ALL SIMD instruction sets in liboqs so SHAKE uses
-  # the same scalar Keccak as XKCP generic64. OQS_DIST_BUILD=OFF alone is
-  # not enough — cmake auto-detects AVX2 at compile time on x86_64.
-  OQS_ARCH_FLAGS="-DOQS_USE_AVX_INSTRUCTIONS=OFF -DOQS_USE_AVX2_INSTRUCTIONS=OFF -DOQS_USE_AVX512_INSTRUCTIONS=OFF -DOQS_USE_AES_INSTRUCTIONS=OFF -DOQS_USE_SSE2_INSTRUCTIONS=OFF -DOQS_USE_BMI1_INSTRUCTIONS=OFF -DOQS_USE_BMI2_INSTRUCTIONS=OFF -DOQS_USE_PCLMULQDQ_INSTRUCTIONS=OFF -DOQS_USE_POPCNT_INSTRUCTIONS=OFF -DOQS_USE_ADX_INSTRUCTIONS=OFF"
+  OQS_ARCH_FLAGS="-DOQS_USE_AVX_INSTRUCTIONS=OFF -DOQS_USE_AVX2_INSTRUCTIONS=OFF -DOQS_USE_AVX512_INSTRUCTIONS=OFF"
 else
-  OQS_CFLAGS="-O3 -march=native"
-  # Disable aarch64-optimized assembly (assembler compatibility + scalar parity)
   OQS_ARCH_FLAGS="-DOQS_ENABLE_KEM_kyber_512_aarch64=OFF -DOQS_ENABLE_KEM_kyber_768_aarch64=OFF -DOQS_ENABLE_KEM_kyber_1024_aarch64=OFF"
 fi
 (cd liboqs && cmake -S . -B build \
@@ -154,12 +152,10 @@ else
 fi
 
 # ── 8. Common helper objects ───────────────────────────────────────────────────
-# Base CFLAGS: x86_64 uses -O3 only (scalar parity); aarch64 adds -march=native
-if [ "$ARCH" = "x86_64" ]; then
-  BASE_CFLAGS="-O3"
-else
-  BASE_CFLAGS="-O3 -march=native"
-fi
+# -march=native on all platforms — generates correct code for the actual CPU.
+# Parity is achieved by disabling AVX/AVX2/AVX512 in liboqs cmake (step 4),
+# not by removing -march=native from the compiler.
+BASE_CFLAGS="-O3 -march=native"
 
 echo "[8/15] Compiling common helper objects..."
 gcc $BASE_CFLAGS -I PQClean/common -c PQClean/common/fips202.c     -o PQClean/common/fips202_turbo.o

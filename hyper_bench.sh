@@ -130,12 +130,7 @@ read -rp "  Select [1-2]: " FAMILY
 HBUILD="$ROOT/.hyper_build"
 mkdir -p "$HBUILD"
 
-# x86_64: -O3 only (scalar parity); aarch64: add -march=native for NEON
-if [ "$ARCH" = "x86_64" ]; then
-  BASE_CFLAGS="-O3"
-else
-  BASE_CFLAGS="-O3 -march=native"
-fi
+BASE_CFLAGS="-O3 -march=native"
 
 echo ""
 echo "[build] Compiling common objects..."
