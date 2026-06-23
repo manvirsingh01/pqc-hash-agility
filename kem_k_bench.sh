@@ -149,7 +149,7 @@ echo ""
 read -rp "  Press ENTER to start... "
 
 # ── CSV headers ──
-KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits"
+KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits,standard_level,fips_applicable"
 [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
 [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
@@ -157,11 +157,18 @@ KBUILD="$ROOT/.kem_k_build"
 mkdir -p "$KBUILD"
 
 # ── Compile common objects once ──
+# x86_64: -O3 only (scalar parity); aarch64: add -march=native for NEON
+if [ "$ARCH" = "x86_64" ]; then
+  BASE_CFLAGS="-O3"
+else
+  BASE_CFLAGS="-O3 -march=native"
+fi
+
 echo ""
 echo "[build] Compiling common objects..."
 COMMON_OBJS="$KBUILD/fips202.o $KBUILD/randombytes.o"
-gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$KBUILD/fips202.o" "$COMMON_DIR/fips202.c"
-gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$KBUILD/randombytes.o" "$COMMON_DIR/randombytes.c"
+gcc $BASE_CFLAGS -I"$COMMON_DIR" -c -o "$KBUILD/fips202.o" "$COMMON_DIR/fips202.c"
+gcc $BASE_CFLAGS -I"$COMMON_DIR" -c -o "$KBUILD/randombytes.o" "$COMMON_DIR/randombytes.c"
 
 # ── Compile + benchmark function ──
 run_k_bench() {
@@ -258,7 +265,7 @@ int ${PREFIX}_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 AEOF
 
   # CFLAGS
-  local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+  local CFLAGS_V="$BASE_CFLAGS -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
   # Compile all variant .c to .o
   local OBJ_FILES=""
@@ -334,6 +341,12 @@ int main(int argc, char **argv) {
     }
 
     int k_val = KYBER_K;
+    const char *std_level = "non-standard-research-only";
+    int fips_applicable = 0;
+    if (k_val == 2) { std_level = "ML-KEM-512"; fips_applicable = 1; }
+    else if (k_val == 3) { std_level = "ML-KEM-768"; fips_applicable = 1; }
+    else if (k_val == 4) { std_level = "ML-KEM-1024"; fips_applicable = 1; }
+
     uint8_t pk[${PREFIX}_CRYPTO_PUBLICKEYBYTES];
     uint8_t sk[${PREFIX}_CRYPTO_SECRETKEYBYTES];
     uint8_t ct[${PREFIX}_CRYPTO_CIPHERTEXTBYTES];
@@ -383,14 +396,15 @@ int main(int argc, char **argv) {
             fprintf(fp,"%s,%d,%s,%s,%s,%s,%d,"
                 "%"PRIu64",%"PRIu64",%"PRIu64",%"PRIu64","
                 "%"PRIu64",%"PRIu64",%"PRIu64","
-                "%.2f,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                "%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%s,%d\n",
                 backend,k_val,algo,bench_type,ops[op],correct,iters,
                 st.mean,st.median,st.mn,st.mx,st.sd,st.p95,st.p99,st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
                 ${PREFIX}_CRYPTO_CIPHERTEXTBYTES,
                 ${PREFIX}_CRYPTO_BYTES,
-                KYBER_ETA1,KYBER_ETA2,$DU,$DV);
+                KYBER_ETA1,KYBER_ETA2,$DU,$DV,
+                std_level,fips_applicable);
         }
     }
     if(fp) fclose(fp);

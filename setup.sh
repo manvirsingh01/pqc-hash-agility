@@ -77,11 +77,25 @@ XKCP_HDRS="$ROOT/XKCP/bin/generic64/libXKCP.a.headers"
 XKCP_LIB="$ROOT/XKCP/bin/generic64/libXKCP.a"
 
 # ── 4. Build liboqs (full build — all ML-KEM + ML-DSA variants) ──────────────
+# On x86_64: build WITHOUT -march=native to force scalar Keccak (no AVX2 dispatch).
+# On aarch64: keep -march=native (needed for NEON assembly); parity is already
+#             matched since XKCP generic64 and liboqs aarch64 are at similar tiers.
 echo "[4/15] Building liboqs (static + shared, Release)..."
+if [ "$ARCH" = "x86_64" ]; then
+  OQS_CFLAGS="-O3"
+  OQS_ARCH_FLAGS=""
+else
+  OQS_CFLAGS="-O3 -march=native"
+  # Disable aarch64-optimized assembly (assembler compatibility + scalar parity)
+  OQS_ARCH_FLAGS="-DOQS_ENABLE_KEM_kyber_512_aarch64=OFF -DOQS_ENABLE_KEM_kyber_768_aarch64=OFF -DOQS_ENABLE_KEM_kyber_1024_aarch64=OFF"
+fi
 (cd liboqs && cmake -S . -B build \
     -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_C_FLAGS="-O3 -march=native" \
+    -DCMAKE_C_FLAGS="$OQS_CFLAGS" \
     -DOQS_BUILD_ONLY_LIB=ON \
+    -DOQS_DIST_BUILD=OFF \
+    -DOQS_USE_OPENSSL=OFF \
+    $OQS_ARCH_FLAGS \
     -GNinja && \
   ninja -C build -j"$NPROC")
 OQS_INC="$ROOT/liboqs/build/include"
@@ -137,9 +151,16 @@ else
 fi
 
 # ── 8. Common helper objects ───────────────────────────────────────────────────
+# Base CFLAGS: x86_64 uses -O3 only (scalar parity); aarch64 adds -march=native
+if [ "$ARCH" = "x86_64" ]; then
+  BASE_CFLAGS="-O3"
+else
+  BASE_CFLAGS="-O3 -march=native"
+fi
+
 echo "[8/15] Compiling common helper objects..."
-gcc -O3 -march=native -I PQClean/common -c PQClean/common/fips202.c     -o PQClean/common/fips202_turbo.o
-gcc -O3 -march=native -I PQClean/common -c PQClean/common/randombytes.c -o PQClean/common/randombytes_turbo.o
+gcc $BASE_CFLAGS -I PQClean/common -c PQClean/common/fips202.c     -o PQClean/common/fips202_turbo.o
+gcc $BASE_CFLAGS -I PQClean/common -c PQClean/common/randombytes.c -o PQClean/common/randombytes_turbo.o
 
 # ── 9. Build BLAKE3 portable (all SIMD disabled for cross-arch compatibility) ─
 echo "[9/15] Building BLAKE3 portable library..."
@@ -185,18 +206,18 @@ echo "    Static libs done."
 echo "[13/15] Compiling OQS adapter objects..."
 for tag in $BACKENDS; do
   HFLAGS=""; [ "$tag" = "haraka" ] && HFLAGS="$HARAKA_CFLAGS"
-  gcc -O3 -march=native $HFLAGS -I "$OQS_INC" ${EXTRA[$tag]} \
+  gcc $BASE_CFLAGS $HFLAGS -I "$OQS_INC" ${EXTRA[$tag]} \
       -c "pqc_${tag}_kem.c" -o "pqc_${tag}_kem.o"
-  gcc -O3 -march=native $HFLAGS -I "$OQS_INC" ${EXTRA[$tag]} \
+  gcc $BASE_CFLAGS $HFLAGS -I "$OQS_INC" ${EXTRA[$tag]} \
       -c "pqc_${tag}_dsa.c" -o "pqc_${tag}_dsa.o"
 done
 
 # ── 14. Compile bench_shake (FIPS SHAKE baseline via liboqs static) ───────────
 echo "[14/15] Compiling and linking benchmark binaries..."
 
-gcc -O3 -march=native -I "$OQS_INC" -c pqc_bench.c -o pqc_bench_shake.o
+gcc $BASE_CFLAGS -I "$OQS_INC" -c pqc_bench.c -o pqc_bench_shake.o
 # Static link against liboqs.a so binary runs without LD_LIBRARY_PATH
-gcc -O3 -march=native pqc_bench_shake.o \
+gcc $BASE_CFLAGS pqc_bench_shake.o \
     "$OQS_STATIC" -lcrypto -lm -o bench_shake
 
 # ── 15. Compile + link per-backend bench binaries (static) ───────────────────
@@ -207,7 +228,7 @@ for tag in $BACKENDS; do
   UTAG=$(echo "$tag" | tr '[:lower:]' '[:upper:]')
   HFLAGS=""; [ "$tag" = "haraka" ] && HFLAGS="$HARAKA_CFLAGS"
 
-  gcc -O3 -march=native $HFLAGS -DUSE_${UTAG} -I "$OQS_INC" ${EXTRA[$tag]} \
+  gcc $BASE_CFLAGS $HFLAGS -DUSE_${UTAG} -I "$OQS_INC" ${EXTRA[$tag]} \
       -c pqc_bench.c -o "pqc_bench_${tag}.o"
 
   KLIBS=""
@@ -226,7 +247,7 @@ for tag in $BACKENDS; do
     haraka)                 EXTRALIB="$ROOT/PQClean/common/Haraka/libharaka.a" ;;
   esac
 
-  gcc -O3 -march=native $HFLAGS \
+  gcc $BASE_CFLAGS $HFLAGS \
     "pqc_bench_${tag}.o" "pqc_${tag}_kem.o" "pqc_${tag}_dsa.o" \
     $KLIBS $SLIBS \
     PQClean/common/fips202_turbo.o PQClean/common/randombytes_turbo.o \

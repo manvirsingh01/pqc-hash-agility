@@ -23,6 +23,7 @@ pqc_benchmark_results.csv
 full_benchmark_results.csv
 kem_hyper_benchmark.csv
 dsa_hyper_benchmark.csv
+results/
 
 # Temporary build directories
 .hyper_build/

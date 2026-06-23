@@ -294,6 +294,37 @@
  * used in low-power literature to balance speed vs. energy together. */
 
 /* =========================================================================
+ * RAPL ENERGY MEASUREMENT (Linux x86 only)
+ *
+ * Intel RAPL (Running Average Power Limit) provides actual hardware energy
+ * measurements via /sys/class/powercap/. When available, this gives real
+ * energy consumption in microjoules. Falls back to the software proxy
+ * (EPU = median cycles) when RAPL is unavailable.
+ * ========================================================================= */
+#include <fcntl.h>
+#include <unistd.h>
+
+static int rapl_available = 0;
+
+static double rapl_read_uj(void) {
+    static int fd = -2;
+    if (fd == -2) {
+        fd = open("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
+                  O_RDONLY);
+    }
+    if (fd < 0) return -1.0;
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    pread(fd, buf, sizeof(buf) - 1, 0);
+    return strtod(buf, NULL);
+}
+
+static void rapl_init(void) {
+    double v = rapl_read_uj();
+    rapl_available = (v > 0.0) ? 1 : 0;
+}
+
+/* =========================================================================
  * ALGORITHM VARIANT TAG
  * Printed in all reports so you know which hash backend is active.
  * ========================================================================= */
@@ -423,9 +454,14 @@ static inline uint64_t cpucycles_end(void) {
     return ((uint64_t)hi << 32) | lo;
 }
 #elif defined(__aarch64__)
+/*
+ * aarch64 counter: CNTVCT_EL0 is a fixed-frequency timer (typically 24-54 MHz),
+ * NOT the CPU cycle counter. Values are "timer ticks", not CPU cycles.
+ * CpB and energy proxy columns derived from this are timer-tick-based, not
+ * cycle-based. For cross-architecture comparison, use wall-clock (ns) columns.
+ */
 static inline uint64_t cpucycles_begin(void) {
     uint64_t val;
-    /* isb => instruction barrier, serializes before reading the counter. */
     __asm__ volatile (
         "isb\n\t"
         "mrs %0, cntvct_el0\n\t"
@@ -447,9 +483,26 @@ static inline uint64_t cpucycles_end(void) {
     );
     return val;
 }
+
+static inline uint64_t get_timer_freq_hz(void) {
+    uint64_t freq;
+    __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(freq));
+    return freq;
+}
 #else
 #  error "cpucycles_begin/end: unsupported architecture (need x86_64 or aarch64)"
 #endif
+
+/* Counter type identification for reports and CSV */
+static const char *get_cycle_counter_type(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    return "rdtsc (CPU cycles)";
+#elif defined(__aarch64__)
+    return "cntvct_el0 (timer ticks, NOT CPU cycles)";
+#else
+    return "unknown";
+#endif
+}
 
 /* High-resolution wall clock (nanoseconds).  Used ONLY for human-readable
  * output; NOT used for cryptographic benchmarking (too noisy). */
@@ -882,15 +935,28 @@ typedef struct {
     int   heap_available;      /* 1 if mallinfo-based tracking is active  */
 } mem_stats_t;
 
-/* Returns the process's current peak RSS in kilobytes.  Portable across
- * Linux (already reported in KB) and macOS/BSD (reported in bytes). */
-static long get_peak_rss_kb(void) {
+/* Returns the process's current RSS in kilobytes via /proc/self/status.
+ * Unlike getrusage(ru_maxrss) which is monotonically non-decreasing,
+ * VmRSS reflects the actual current resident set. Falls back to getrusage. */
+static long get_current_rss_kb(void) {
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[128];
+        while (fgets(line, sizeof(line), f)) {
+            long rss;
+            if (sscanf(line, "VmRSS: %ld kB", &rss) == 1) {
+                fclose(f);
+                return rss;
+            }
+        }
+        fclose(f);
+    }
     struct rusage ru;
     if (getrusage(RUSAGE_SELF, &ru) != 0) return -1;
 #if defined(__APPLE__)
-    return (long)(ru.ru_maxrss / 1024L);   /* macOS/BSD report bytes */
+    return (long)(ru.ru_maxrss / 1024L);
 #else
-    return (long)ru.ru_maxrss;             /* Linux reports KB       */
+    return (long)ru.ru_maxrss;
 #endif
 }
 
@@ -925,12 +991,12 @@ typedef void (*mem_probe_fn)(void *ctx);
 static void mem_profile_op(mem_probe_fn op, void *ctx, mem_stats_t *out) {
     memset(out, 0, sizeof(*out));
 
-    long rss_before  = get_peak_rss_kb();
+    long rss_before  = get_current_rss_kb();
     long heap_before = get_heap_bytes();
 
     op(ctx);
 
-    long rss_after  = get_peak_rss_kb();
+    long rss_after  = get_current_rss_kb();
     long heap_after = get_heap_bytes();
 
     out->peak_rss_after_kb  = rss_after;
@@ -973,7 +1039,9 @@ typedef struct {
     double  est_energy_uj;          /* estimated energy via ENERGY_PER_CYCLE_NJ */
     double  est_energy_uj_per_byte; /* per-byte version of the above          */
     double  edp_cycle_ns;           /* Energy-Delay Product (cycles * ns)     */
+    double  rapl_energy_uj;         /* actual RAPL measurement (0 if unavail) */
     int     calibrated;             /* 1 if ENERGY_PER_CYCLE_NJ user-supplied */
+    int     rapl_measured;          /* 1 if rapl_energy_uj is a real reading  */
 } energy_stats_t;
 
 static void compute_energy_stats(energy_stats_t *e,
@@ -991,8 +1059,10 @@ static void compute_energy_stats(energy_stats_t *e,
                                      ? e->est_energy_uj / (double)bytes_per_op
                                      : 0.0;
 
-    e->edp_cycle_ns = s->median * s->wall_ns;
-    e->calibrated   = ENERGY_MODEL_CALIBRATED;
+    e->edp_cycle_ns  = s->median * s->wall_ns;
+    e->calibrated    = ENERGY_MODEL_CALIBRATED;
+    e->rapl_energy_uj = 0.0;
+    e->rapl_measured  = 0;
 }
 
 /* Pretty-printer for the memory + energy tiers is defined further below,
@@ -1085,6 +1155,15 @@ static void print_mem_energy(const char *label,
            e->calibrated
                ? "(calibrated via ENERGY_PER_CYCLE_NJ)"
                : "(illustrative k=1.0 nJ/cyc -- NOT a real measurement)");
+    if (e->rapl_measured)
+        printf("  %-30s : %12.4f  uJ   (Intel RAPL hardware measurement)\n",
+               "RAPL energy (per op)", e->rapl_energy_uj);
+    else if (rapl_available)
+        printf("  %-30s : %12s  (RAPL read failed for this op)\n",
+               "RAPL energy", "n/a");
+    else
+        printf("  %-30s : %12s  (RAPL unavailable on this platform)\n",
+               "RAPL energy", "n/a");
     if (e->est_energy_uj_per_byte > 0.0)
         printf("  %-30s : %12.6f  uJ/byte\n",
                "Est. energy per byte", e->est_energy_uj_per_byte);
@@ -1222,17 +1301,38 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     uint64_t wall_start, wall_end;
 
     /* ================================================================
+     * MEASURE TIMING OVERHEAD (Fix 7: subtract harness cost)
+     * Runs an empty begin/end cycle to measure the rdtsc/cntvct overhead.
+     * This is subtracted from each measurement to isolate the crypto op.
+     * ================================================================ */
+    uint64_t timing_overhead = 0;
+    {
+        uint64_t oh_samples[256];
+        for (int oi = 0; oi < 256; oi++) {
+            uint64_t t0 = cpucycles_begin();
+            __asm__ volatile("" ::: "memory");
+            uint64_t t1 = cpucycles_end();
+            oh_samples[oi] = t1 - t0;
+        }
+        qsort(oh_samples, 256, sizeof(uint64_t), uint64_cmp);
+        timing_overhead = oh_samples[128];
+    }
+
+    /* ================================================================
      * KEYGEN BENCHMARK LOOP
      * ================================================================ */
     wall_start = wallclock_ns();
     if (run_stack) stack_paint(stack_region, STACK_PAINT_REGION_BYTES);
+    double rapl_kg_before = rapl_available ? rapl_read_uj() : 0.0;
 
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_KEM_keypair(kem, pk, sk);
         uint64_t t1 = cpucycles_end();
-        cycles_kg[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_kg[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
+    double rapl_kg_after = rapl_available ? rapl_read_uj() : 0.0;
     wall_end = wallclock_ns();
 
     if (run_stack)
@@ -1251,6 +1351,11 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     }
     compute_energy_stats(&result.energy_keygen, &result.keygen,
                          kem->length_public_key + kem->length_secret_key);
+    if (rapl_available && rapl_kg_after > rapl_kg_before) {
+        result.energy_keygen.rapl_energy_uj =
+            (rapl_kg_after - rapl_kg_before) / (double)BENCH_ITERATIONS;
+        result.energy_keygen.rapl_measured = 1;
+    }
 
 
     /* ================================================================
@@ -1258,13 +1363,16 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
      * ================================================================ */
     wall_start = wallclock_ns();
     if (run_stack) stack_paint(stack_region, STACK_PAINT_REGION_BYTES);
+    double rapl_enc_before = rapl_available ? rapl_read_uj() : 0.0;
 
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_KEM_encaps(kem, ct, ss, pk);
         uint64_t t1 = cpucycles_end();
-        cycles_enc[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_enc[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
+    double rapl_enc_after = rapl_available ? rapl_read_uj() : 0.0;
     wall_end = wallclock_ns();
 
     if (run_stack)
@@ -1282,6 +1390,11 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     }
     compute_energy_stats(&result.energy_encaps, &result.encaps,
                          kem->length_ciphertext + kem->length_shared_secret);
+    if (rapl_available && rapl_enc_after > rapl_enc_before) {
+        result.energy_encaps.rapl_energy_uj =
+            (rapl_enc_after - rapl_enc_before) / (double)BENCH_ITERATIONS;
+        result.energy_encaps.rapl_measured = 1;
+    }
 
 
     /* ================================================================
@@ -1289,13 +1402,16 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
      * ================================================================ */
     wall_start = wallclock_ns();
     if (run_stack) stack_paint(stack_region, STACK_PAINT_REGION_BYTES);
+    double rapl_dec_before = rapl_available ? rapl_read_uj() : 0.0;
 
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_KEM_decaps(kem, ss, ct, sk);
         uint64_t t1 = cpucycles_end();
-        cycles_dec[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_dec[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
+    double rapl_dec_after = rapl_available ? rapl_read_uj() : 0.0;
     wall_end = wallclock_ns();
 
     if (run_stack)
@@ -1313,6 +1429,11 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     }
     compute_energy_stats(&result.energy_decaps, &result.decaps,
                          kem->length_ciphertext + kem->length_shared_secret);
+    if (rapl_available && rapl_dec_after > rapl_dec_before) {
+        result.energy_decaps.rapl_energy_uj =
+            (rapl_dec_after - rapl_dec_before) / (double)BENCH_ITERATIONS;
+        result.energy_decaps.rapl_measured = 1;
+    }
 
 
     /* ================================================================
@@ -1478,17 +1599,34 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     uint64_t wall_start, wall_end;
     size_t   sig_len = 0;
 
+    /* Measure timing overhead (same as KEM) */
+    uint64_t timing_overhead = 0;
+    {
+        uint64_t oh_samples[256];
+        for (int oi = 0; oi < 256; oi++) {
+            uint64_t t0 = cpucycles_begin();
+            __asm__ volatile("" ::: "memory");
+            uint64_t t1 = cpucycles_end();
+            oh_samples[oi] = t1 - t0;
+        }
+        qsort(oh_samples, 256, sizeof(uint64_t), uint64_cmp);
+        timing_overhead = oh_samples[128];
+    }
+
     /* ================================================================
      * KEYGEN BENCHMARK LOOP
      * ================================================================ */
+    double rapl_sig_kg_before = rapl_available ? rapl_read_uj() : 0.0;
     wall_start = wallclock_ns();
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_SIG_keypair(sig, pk, sk);
         uint64_t t1 = cpucycles_end();
-        cycles_kg[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_kg[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
     wall_end = wallclock_ns();
+    double rapl_sig_kg_after = rapl_available ? rapl_read_uj() : 0.0;
 
     if (run_stack)
         result.stack_hwm_keygen = stack_measure_hwm(stack_region, STACK_PAINT_REGION_BYTES);
@@ -1505,6 +1643,11 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     }
     compute_energy_stats(&result.energy_keygen, &result.keygen,
                          sig->length_public_key + sig->length_secret_key);
+    if (rapl_available && rapl_sig_kg_after > rapl_sig_kg_before) {
+        result.energy_keygen.rapl_energy_uj =
+            (rapl_sig_kg_after - rapl_sig_kg_before) / (double)BENCH_ITERATIONS;
+        result.energy_keygen.rapl_measured = 1;
+    }
 
 
     /* ================================================================
@@ -1518,20 +1661,22 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     OQS_SIG_keypair(sig, pk, sk);
 
     if (run_stack) stack_paint(stack_region, STACK_PAINT_REGION_BYTES);
+    double rapl_sign_before = rapl_available ? rapl_read_uj() : 0.0;
     wall_start = wallclock_ns();
 
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_SIG_sign(sig, signature, &sig_len, msg, BENCH_MSG_LEN, sk);
         uint64_t t1 = cpucycles_end();
-        cycles_sign[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_sign[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
     wall_end = wallclock_ns();
+    double rapl_sign_after = rapl_available ? rapl_read_uj() : 0.0;
 
     if (run_stack)
         result.stack_hwm_sign = stack_measure_hwm(stack_region, STACK_PAINT_REGION_BYTES);
 
-    /* CpB for signing: output artifact is the signature bytes. */
     compute_stats(&result.sign_op,
                   cycles_sign + BENCH_WARMUP,
                   BENCH_ITERATIONS,
@@ -1544,6 +1689,11 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
         mem_profile_op(sig_sign_probe, &sctx, &result.mem_sign);
     }
     compute_energy_stats(&result.energy_sign, &result.sign_op, sig->length_signature);
+    if (rapl_available && rapl_sign_after > rapl_sign_before) {
+        result.energy_sign.rapl_energy_uj =
+            (rapl_sign_after - rapl_sign_before) / (double)BENCH_ITERATIONS;
+        result.energy_sign.rapl_measured = 1;
+    }
 
 
     result.rejection.total_signatures = BENCH_ITERATIONS;
@@ -1553,15 +1703,18 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
      * Verify is deterministic: no rejection sampling variance expected.
      * ================================================================ */
     if (run_stack) stack_paint(stack_region, STACK_PAINT_REGION_BYTES);
+    double rapl_ver_before = rapl_available ? rapl_read_uj() : 0.0;
     wall_start = wallclock_ns();
 
     for (uint64_t i = 0; i < total_iters; i++) {
         uint64_t t0 = cpucycles_begin();
         OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, signature, sig_len, pk);
         uint64_t t1 = cpucycles_end();
-        cycles_ver[i] = t1 - t0;
+        uint64_t raw = t1 - t0;
+        cycles_ver[i] = (raw > timing_overhead) ? raw - timing_overhead : 0;
     }
     wall_end = wallclock_ns();
+    double rapl_ver_after = rapl_available ? rapl_read_uj() : 0.0;
 
     if (run_stack)
         result.stack_hwm_verify = stack_measure_hwm(stack_region, STACK_PAINT_REGION_BYTES);
@@ -1577,6 +1730,11 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
         mem_profile_op(sig_verify_probe, &sctx, &result.mem_verify);
     }
     compute_energy_stats(&result.energy_verify, &result.verify, sig->length_signature);
+    if (rapl_available && rapl_ver_after > rapl_ver_before) {
+        result.energy_verify.rapl_energy_uj =
+            (rapl_ver_after - rapl_ver_before) / (double)BENCH_ITERATIONS;
+        result.energy_verify.rapl_measured = 1;
+    }
 
 
     /* ================================================================
@@ -1813,6 +1971,7 @@ static void csv_open(int append) {
     }
     fprintf(csv_fp,
             "algorithm,operation,hash_backend,keccak_rounds,fips_compliant,"
+            "counter_type,"
             "n_iterations,median_cycles,q1_cycles,q3_cycles,iqr_cycles,"
             "p95_cycles,p99_cycles,min_cycles,max_cycles,"
             "arith_mean_cycles,geo_mean_cycles,std_dev_cycles,cov_pct,"
@@ -1822,7 +1981,8 @@ static void csv_open(int append) {
             "peak_rss_delta_kb,peak_rss_after_kb,heap_delta_bytes,"
             "energy_proxy_units,energy_proxy_per_byte,"
             "est_energy_uj,est_energy_uj_per_byte,energy_calibrated,"
-            "edp_cycle_ns\n");
+            "edp_cycle_ns,"
+            "rapl_energy_uj,rapl_measured\n");
 }
 
 static void csv_write_stats(const char            *algo,
@@ -1840,6 +2000,7 @@ static void csv_write_stats(const char            *algo,
     if (!csv_fp) return;
     fprintf(csv_fp,
             "%s,%s,\"%s\",%d,%d,"
+            "\"%s\","
             "%"PRIu64","
             "%.0f,%.0f,%.0f,%.0f,"
             "%.0f,%.0f,"
@@ -1851,8 +2012,10 @@ static void csv_write_stats(const char            *algo,
             "%ld,%ld,%ld,"
             "%.0f,%.4f,"
             "%.4f,%.6f,%d,"
-            "%.2f\n",
+            "%.2f,"
+            "%.4f,%d\n",
             algo, op, HASH_BACKEND_TAG, HASH_ROUNDS, FIPS_COMPLIANT,
+            get_cycle_counter_type(),
             s->n,
             s->median, s->q1, s->q3, s->iqr,
             s->p95, s->p99,
@@ -1864,7 +2027,8 @@ static void csv_write_stats(const char            *algo,
             m->peak_rss_delta_kb, m->peak_rss_after_kb, m->heap_delta_bytes,
             e->epu, e->epu_per_byte,
             e->est_energy_uj, e->est_energy_uj_per_byte, e->calibrated,
-            e->edp_cycle_ns);
+            e->edp_cycle_ns,
+            e->rapl_energy_uj, e->rapl_measured);
 }
 
 static void csv_close(void) {
@@ -1943,20 +2107,26 @@ int main(int argc, char *argv[]) {
      *                     (skips the header row if the file already has one)
      *   --quick          50 iterations only (fast sanity check)
      * ---------------------------------------------------------------- */
-    int run_dudect  = 0;   /* Off by default: very time-consuming */
-    int run_stack   = 1;
-    int run_kem     = 1;
-    int run_dsa     = 1;
-    int csv_append  = 0;
+    int run_dudect        = 0;   /* Off by default: very time-consuming */
+    int run_stack         = 1;
+    int run_kem           = 1;
+    int run_dsa           = 1;
+    int csv_append        = 0;
+    int correctness_only  = 0;
+    int correctness_trials = 1000;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--dudect")    == 0) run_dudect = 1;
-        if (strcmp(argv[i], "--no-stack")  == 0) run_stack  = 0;
-        if (strcmp(argv[i], "--kem-only")  == 0) run_dsa    = 0;
-        if (strcmp(argv[i], "--dsa-only")  == 0) run_kem    = 0;
-        if (strcmp(argv[i], "--csv-append") == 0) csv_append = 1;
+        if (strcmp(argv[i], "--dudect")          == 0) run_dudect = 1;
+        if (strcmp(argv[i], "--no-stack")        == 0) run_stack  = 0;
+        if (strcmp(argv[i], "--kem-only")        == 0) run_dsa    = 0;
+        if (strcmp(argv[i], "--dsa-only")        == 0) run_kem    = 0;
+        if (strcmp(argv[i], "--csv-append")      == 0) csv_append = 1;
+        if (strcmp(argv[i], "--correctness-only") == 0) correctness_only = 1;
+        if (strcmp(argv[i], "--trials") == 0 && i + 1 < argc)
+            correctness_trials = atoi(argv[++i]);
         if (strcmp(argv[i], "--help")     == 0) {
-            printf("Usage: %s [--dudect] [--no-stack] [--kem-only] [--dsa-only] [--csv-append]\n",
+            printf("Usage: %s [--dudect] [--no-stack] [--kem-only] [--dsa-only] "
+                   "[--csv-append] [--correctness-only] [--trials N]\n",
                    argv[0]);
             return 0;
         }
@@ -1964,6 +2134,9 @@ int main(int argc, char *argv[]) {
 
     /* Seed RNG for dudect class alternation. */
     srand((unsigned)time(NULL));
+
+    /* Initialize RAPL energy measurement. */
+    rapl_init();
 
     /* ----------------------------------------------------------------
      * Print benchmark header
@@ -1979,9 +2152,18 @@ int main(int argc, char *argv[]) {
     printf("  Keccak Rounds    : %d  (SHAKE=24 | TurboSHAKE=12)\n", HASH_ROUNDS);
     printf("  FIPS Compliant   : %s\n", FIPS_COMPLIANT ? "YES (FIPS 202/203/204)" :
                                                           "NO  (closed ecosystem / research only)");
+    printf("  Cycle counter    : %s\n", get_cycle_counter_type());
+#if defined(__aarch64__)
+    printf("  Timer frequency  : %"PRIu64" Hz (CNTFRQ_EL0)\n", get_timer_freq_hz());
+    printf("  NOTE: aarch64 'cycle' columns are timer ticks, not CPU cycles.\n");
+    printf("        Use wall_ns columns for cross-architecture comparison.\n");
+#endif
     printf("  Iterations       : %d  (warmup=%d)\n", BENCH_ITERATIONS, BENCH_WARMUP);
     printf("  Message length   : %d bytes\n", BENCH_MSG_LEN);
     printf("  Stack paint size : %d KB\n",    STACK_PAINT_REGION_BYTES / 1024);
+    printf("  RAPL energy      : %s\n",
+           rapl_available ? "AVAILABLE (Intel RAPL hardware measurement)"
+                          : "UNAVAILABLE (using software energy proxy only)");
     printf("  Dudect enabled   : %s  (pass --dudect to enable)\n",
            run_dudect ? "YES" : "NO");
     printf("  Memory profiling : Peak RSS (getrusage) + heap delta (mallinfo)"
@@ -2038,6 +2220,89 @@ int main(int argc, char *argv[]) {
         printf("  DO NOT use in open-internet TLS 1.3 deployments.\n");
     }
     printf("\n");
+
+    /* ================================================================
+     * CORRECTNESS-ONLY MODE
+     * Runs N independent round-trip tests per algorithm with tamper
+     * detection. No timing measurement. Exit code 0 = all pass.
+     * ================================================================ */
+    if (correctness_only) {
+        printf("\n  === CORRECTNESS-ONLY MODE (%d trials per algorithm) ===\n\n",
+               correctness_trials);
+        int all_pass = 1;
+
+        if (run_kem) {
+            const char *kem_algs_co[] = { MLKEM_512_NAME, MLKEM_768_NAME, MLKEM_1024_NAME };
+            for (int ki = 0; ki < 3; ki++) {
+                OQS_KEM *kem = OQS_KEM_new(kem_algs_co[ki]);
+                if (!kem) { fprintf(stderr, "[ERROR] Cannot create %s\n", kem_algs_co[ki]); all_pass = 0; continue; }
+                uint8_t *pk = malloc(kem->length_public_key);
+                uint8_t *sk = malloc(kem->length_secret_key);
+                uint8_t *ct = malloc(kem->length_ciphertext);
+                uint8_t *ss_e = malloc(kem->length_shared_secret);
+                uint8_t *ss_d = malloc(kem->length_shared_secret);
+                int pass = 0, fail = 0, tamper_fail = 0;
+                for (int t = 0; t < correctness_trials; t++) {
+                    if (OQS_KEM_keypair(kem, pk, sk) != OQS_SUCCESS ||
+                        OQS_KEM_encaps(kem, ct, ss_e, pk) != OQS_SUCCESS ||
+                        OQS_KEM_decaps(kem, ss_d, ct, sk) != OQS_SUCCESS ||
+                        memcmp(ss_e, ss_d, kem->length_shared_secret) != 0) {
+                        fail++; continue;
+                    }
+                    ct[0] ^= 0xFF;
+                    OQS_KEM_decaps(kem, ss_d, ct, sk);
+                    if (memcmp(ss_e, ss_d, kem->length_shared_secret) == 0)
+                        tamper_fail++;
+                    ct[0] ^= 0xFF;
+                    pass++;
+                }
+                printf("  %-20s  PASS=%d  FAIL=%d  TAMPER_DETECT_FAIL=%d  %s\n",
+                       kem_algs_co[ki], pass, fail, tamper_fail,
+                       (fail == 0 && tamper_fail == 0) ? "OK" : "*** FAILED ***");
+                if (fail > 0 || tamper_fail > 0) all_pass = 0;
+                free(pk); free(sk); free(ct); free(ss_e); free(ss_d);
+                OQS_KEM_free(kem);
+            }
+        }
+
+        if (run_dsa) {
+            const char *sig_algs_co[] = { MLDSA_44_NAME, MLDSA_65_NAME, MLDSA_87_NAME };
+            for (int si = 0; si < 3; si++) {
+                OQS_SIG *sig = OQS_SIG_new(sig_algs_co[si]);
+                if (!sig) { fprintf(stderr, "[ERROR] Cannot create %s\n", sig_algs_co[si]); all_pass = 0; continue; }
+                uint8_t *pk = malloc(sig->length_public_key);
+                uint8_t *sk = malloc(sig->length_secret_key);
+                uint8_t *sm = malloc(sig->length_signature);
+                uint8_t msg[BENCH_MSG_LEN];
+                for (int b = 0; b < BENCH_MSG_LEN; b++) msg[b] = (uint8_t)(b & 0xFF);
+                size_t smlen = 0;
+                int pass = 0, fail = 0, tamper_fail = 0;
+                for (int t = 0; t < correctness_trials; t++) {
+                    msg[0] = (uint8_t)(t & 0xFF);
+                    if (OQS_SIG_keypair(sig, pk, sk) != OQS_SUCCESS ||
+                        OQS_SIG_sign(sig, sm, &smlen, msg, BENCH_MSG_LEN, sk) != OQS_SUCCESS ||
+                        OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, sm, smlen, pk) != OQS_SUCCESS) {
+                        fail++; continue;
+                    }
+                    msg[1] ^= 0xFF;
+                    if (OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, sm, smlen, pk) == OQS_SUCCESS)
+                        tamper_fail++;
+                    msg[1] ^= 0xFF;
+                    pass++;
+                }
+                printf("  %-20s  PASS=%d  FAIL=%d  TAMPER_DETECT_FAIL=%d  %s\n",
+                       sig_algs_co[si], pass, fail, tamper_fail,
+                       (fail == 0 && tamper_fail == 0) ? "OK" : "*** FAILED ***");
+                if (fail > 0 || tamper_fail > 0) all_pass = 0;
+                free(pk); free(sk); free(sm);
+                OQS_SIG_free(sig);
+            }
+        }
+
+        printf("\n  === CORRECTNESS RESULT: %s ===\n\n",
+               all_pass ? "ALL PASSED" : "FAILURES DETECTED");
+        return all_pass ? 0 : 1;
+    }
 
     /* Open CSV output. */
     csv_open(csv_append);

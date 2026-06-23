@@ -130,10 +130,17 @@ read -rp "  Select [1-2]: " FAMILY
 HBUILD="$ROOT/.hyper_build"
 mkdir -p "$HBUILD"
 
+# x86_64: -O3 only (scalar parity); aarch64: add -march=native for NEON
+if [ "$ARCH" = "x86_64" ]; then
+  BASE_CFLAGS="-O3"
+else
+  BASE_CFLAGS="-O3 -march=native"
+fi
+
 echo ""
 echo "[build] Compiling common objects..."
-gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$HBUILD/fips202.o" "$COMMON_DIR/fips202.c"
-gcc -O3 -march=native -I"$COMMON_DIR" -c -o "$HBUILD/randombytes.o" "$COMMON_DIR/randombytes.c"
+gcc $BASE_CFLAGS -I"$COMMON_DIR" -c -o "$HBUILD/fips202.o" "$COMMON_DIR/fips202.c"
+gcc $BASE_CFLAGS -I"$COMMON_DIR" -c -o "$HBUILD/randombytes.o" "$COMMON_DIR/randombytes.c"
 COMMON_OBJS="$HBUILD/fips202.o $HBUILD/randombytes.o"
 
 # ═══════════════════════════════════════════════════════════════
@@ -300,7 +307,7 @@ int ${PREFIX}_crypto_kem_dec(uint8_t *ss, const uint8_t *ct, const uint8_t *sk);
 #endif
 AEOF
 
-    local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+    local CFLAGS_V="$BASE_CFLAGS -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
     local OBJ_FILES=""
     local COMPILE_OK=1
@@ -799,7 +806,7 @@ int ${PREFIX}_crypto_sign_open(uint8_t *m, size_t *mlen,
 #endif
 AEOF
 
-    local CFLAGS_V="-O3 -march=native -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
+    local CFLAGS_V="$BASE_CFLAGS -Wall -I$VDIR -I$COMMON_DIR -I$OQS_INC -I$XKCP_HDRS -I$BLAKE3_DIR -I$HARAKA_DIR $BLAKE3_FLAGS $HARAKA_CFLAGS"
 
     local OBJ_FILES=""
     local COMPILE_OK=1

@@ -24,7 +24,7 @@ else
   HARAKA_FLAGS := -march=native
 endif
 
-CFLAGS := -O3 -march=native -Wall \
+CFLAGS := -O3 -Wall \
            -I$(OQS_INC) -I$(XKCP_HDRS) \
            -I$(BLAKE3_DIR) -I$(HARAKA_DIR) \
            -I$(ROOT) \

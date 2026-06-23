@@ -2,14 +2,16 @@
 
 Benchmarks **ML-KEM** (FIPS 203) and **ML-DSA** (FIPS 204) across six hash backends, showing the performance cost or gain of replacing the default SHAKE/SHA-3 XOF with alternative hash functions.
 
-| Backend | Hash primitive | FIPS compliant |
-|---|---|---|
-| `shake` | SHAKE128/256 (n_r=24) — liboqs built-in | Yes |
-| `turboshake` | TurboSHAKE128/256 (n_r=12, RFC 9861) | No |
-| `k12` | KangarooTwelve (tree hash, n_r=12, RFC 9861) | No |
-| `blake3` | BLAKE3 XOF (portable, all SIMD off) | No |
-| `xoodyak` | Xoodyak / Xoodoo\[12\] permutation | No |
-| `haraka` | Haraka-256/512 v2 (AES-NI on x86_64, NEON on aarch64) | No |
+| Backend | Hash primitive | Keccak rounds | SIMD tier | FIPS |
+|---|---|---|---|---|
+| `shake` | SHAKE128/256 — liboqs scalar Keccak | 24 | None (scalar) | Yes |
+| `turboshake` | TurboSHAKE128/256 (RFC 9861) | 12 | None (scalar) | No |
+| `k12` | KangarooTwelve (tree hash, RFC 9861) | 12 | None (scalar) | No |
+| `blake3` | BLAKE3 XOF (portable) | N/A (7) | None (all SIMD disabled) | No |
+| `xoodyak` | Xoodyak / Xoodoo\[12\] | 12 (Xoodoo) | None (scalar) | No |
+| `haraka` | Haraka-256/512 v2 (AES round) | N/A (5) | AES-NI / NEON | No |
+
+> **Implementation parity:** All backends are compiled at the same scalar optimisation tier (`-O3`, no `-march=native`). liboqs is built with `OQS_DIST_BUILD=OFF` and `OQS_USE_OPENSSL=OFF` to force scalar Keccak. This ensures the comparison measures algorithm properties (round count, permutation) rather than SIMD vectorisation differences.
 
 **Algorithms benchmarked:** ML-KEM-512 / 768 / 1024 and ML-DSA-44 / 65 / 87
 
@@ -42,6 +44,14 @@ bash kem_k_bench.sh               # interactive: choose backend + k=1..8
 # 6. (Optional) Run hyperparameter benchmark
 bash hyper_bench.sh               # interactive: tweak ML-KEM/ML-DSA params
 # Produces: results/custom_*_hyper_benchmark.csv + results/library_default_*_hyper_benchmark.csv
+
+# 7. (Optional) Run controlled benchmark with replication for statistical rigor
+sudo bash bench_controlled.sh     # 10 rounds, CPU pinned, turbo off
+python3 compute_ci.py             # compute 95% CI and effect sizes
+# Produces: results/summary_with_ci.csv + results/effect_sizes.csv
+
+# 8. (Optional) Run correctness-only tests (no timing)
+./bench_shake --correctness-only --trials 1000
 ```
 
 ---
@@ -69,6 +79,8 @@ pqc-hash-agility/
 ├── bench.sh                  # run all backends -> two CSV files
 ├── kem_k_bench.sh            # interactive variable-k ML-KEM benchmark
 ├── hyper_bench.sh            # interactive hyperparameter benchmark (KEM + DSA)
+├── bench_controlled.sh       # controlled runner: CPU pinning, replication, CI
+├── compute_ci.py             # compute 95% CI and effect sizes from replications
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
 │   ├── pqc_bench.c           # benchmark harness (compiled 6x with -DUSE_<TAG>)
@@ -105,6 +117,9 @@ pqc-hash-agility/
 │   ├── custom_dsa_hyper_benchmark.csv
 │   ├── library_default_dsa_hyper_benchmark.csv
 │   ├── system_info.txt
+│   ├── summary_with_ci.csv       # (from compute_ci.py) per-op summary with 95% CI
+│   ├── effect_sizes.csv          # (from compute_ci.py) backend comparisons
+│   ├── replications/             # (from bench_controlled.sh) per-round CSVs
 │   └── reference_aarch64.csv  # reference run on ARM (Kali Linux, aarch64)
 └── IMPLEMENTATION_GUIDE.md    # full code walkthrough and design rationale
 ```
@@ -118,7 +133,7 @@ pqc-hash-agility/
 | 1 | `apt-get install` build deps including `xsltproc` (required by XKCP) |
 | 2 | Clone PQClean, XKCP (with `--recurse-submodules`), liboqs at pinned commits |
 | 3 | Build XKCP `generic64/libXKCP.a` (provides TurboSHAKE, K12, Xoodyak) |
-| 4 | Build liboqs with Ninja, full build (provides `liboqs.a` static lib) |
+| 4 | Build liboqs with Ninja (scalar Keccak: `OQS_DIST_BUILD=OFF`, `OQS_USE_OPENSSL=OFF`) |
 | 5 | Drop custom backend sources into `PQClean/common/` and each variant dir |
 | 6 | Patch hardcoded `/root/PQClean` paths to the actual install path |
 | 7 | Select Haraka source: `haraka_x86.c` (AES-NI) or `haraka.c` (NEON) |
@@ -135,6 +150,55 @@ pqc-hash-agility/
 | PQClean | `202a8f96315f9ed219387a50f7e40d04af037ea8` |
 | XKCP | `d71b764513a6c3163b3cfc919dd6f974d98a6c53` |
 | liboqs | `f986aea60a9f3cb4055474aa212538bb0b14f1fe` |
+
+---
+
+## Benchmark Methodology
+
+### Implementation Parity
+
+All backends are compiled at a matched optimisation tier to ensure fair comparison:
+
+- **liboqs** (SHAKE): Built with `-O3` (no `-march=native`), `OQS_DIST_BUILD=OFF`, `OQS_USE_OPENSSL=OFF` — forces scalar Keccak, no AVX2 dispatch
+- **XKCP** (TurboSHAKE, K12, Xoodyak): Built as `generic64` — scalar C Keccak/Xoodoo
+- **BLAKE3**: All SIMD explicitly disabled (`-DBLAKE3_NO_SSE2/SSE41/AVX2/AVX512`)
+- **Haraka**: Uses AES-NI (x86\_64) or ARM Crypto (aarch64) by design — this is intentional since Haraka's performance comes from hardware AES
+
+This ensures the comparison measures **round count** (24 vs 12) and **permutation choice**, not vectorisation tier differences.
+
+### Timing and Overhead
+
+- **x86\_64**: `rdtsc`/`rdtscp` with `lfence` serialisation (true CPU cycles)
+- **aarch64**: `CNTVCT_EL0` timer ticks (fixed-frequency counter, NOT CPU cycles). Wall-clock columns should be used for cross-architecture comparison
+- **Overhead subtraction**: Measurement harness overhead (rdtsc/lfence cost) is measured via an empty timing loop and subtracted from each sample
+
+### Energy Measurement
+
+- **RAPL** (Intel x86): When `/sys/class/powercap/intel-rapl/` is accessible, actual hardware energy is measured per operation in microjoules
+- **Software proxy**: When RAPL is unavailable, Energy Proxy Units (EPU = median cycles) serve as a relative comparison metric. The `est_energy_uj` column uses an illustrative constant unless calibrated via `-DENERGY_PER_CYCLE_NJ=<value>`
+
+### Statistical Rigor
+
+Use `bench_controlled.sh` for publication-quality results:
+
+1. CPU frequency locked to `performance` governor
+2. Intel turbo boost disabled
+3. Process pinned to a single core (`taskset -c 0`)
+4. 10 independent rounds with 5,000 iterations each
+5. `compute_ci.py` produces 95% confidence intervals and flags cells where CI > 5% of median
+6. Effect sizes (speedup claims) are only reported when confidence intervals do not overlap
+
+### Memory Profiling
+
+- **VmRSS**: Current resident set via `/proc/self/status` (not peak-only `getrusage`)
+- **Heap delta**: `mallinfo2()` arena tracking per single call
+- **Stack HWM**: 128 KB sentinel-painted region measures peak stack depth
+
+### Correctness Testing
+
+- `--correctness-only` mode runs N independent round-trip tests with tamper detection
+- KEM: keygen → encaps → decaps → shared secret match, plus ciphertext flip → implicit rejection
+- DSA: keygen → sign → verify → pass, plus message flip → verify must fail
 
 ---
 
