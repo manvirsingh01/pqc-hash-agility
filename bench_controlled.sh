@@ -106,22 +106,41 @@ echo ""
 echo "Backends found: $BENCHES"
 echo ""
 
+# ── Combined CSV header ──
+COMBINED_CSV="$RESULTS_DIR/../controlled_benchmark.csv"
+HEADER_WRITTEN=0
+
 # ── Run rounds ──
 for ROUND in $(seq 1 "$ROUNDS"); do
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Round $ROUND / $ROUNDS"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
+  ORDER=0
   for BENCH in $BENCHES; do
+    ORDER=$((ORDER + 1))
     CSV_OUT="$RESULTS_DIR/round${ROUND}_${BENCH}.csv"
     echo "  [$BENCH] → $(basename "$CSV_OUT")"
 
+    rm -f pqc_benchmark_results.csv
     taskset -c "$CORE" "./$BENCH" \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append 2>&1 | tail -5
 
-    [ -f pqc_benchmark_results.csv ] && mv pqc_benchmark_results.csv "$CSV_OUT"
+    if [ -f pqc_benchmark_results.csv ]; then
+      mv pqc_benchmark_results.csv "$CSV_OUT"
+
+      # Append to combined CSV with round + run_order columns
+      if [ "$HEADER_WRITTEN" = "0" ]; then
+        ORIG_HEADER=$(head -1 "$CSV_OUT")
+        echo "round,run_order,backend_binary,$ORIG_HEADER" > "$COMBINED_CSV"
+        HEADER_WRITTEN=1
+      fi
+      tail -n +2 "$CSV_OUT" | while IFS= read -r line; do
+        echo "$ROUND,$ORDER,$BENCH,$line" >> "$COMBINED_CSV"
+      done
+    fi
   done
 
   if [ "$ROUND" -lt "$ROUNDS" ]; then
@@ -130,13 +149,17 @@ for ROUND in $(seq 1 "$ROUNDS"); do
   fi
 done
 
+COMBINED_ROWS=$(( $(wc -l < "$COMBINED_CSV" 2>/dev/null || echo 1) - 1 ))
+PER_ROUND_COUNT=$(ls "$RESULTS_DIR"/*.csv 2>/dev/null | wc -l)
+
 echo ""
 echo "========================================================="
 echo " DONE — $ROUNDS rounds × $(echo "$BENCHES" | wc -w) backends"
 echo ""
-echo " Results: results/replications/"
-ls -la "$RESULTS_DIR"/*.csv 2>/dev/null | wc -l
-echo " CSV files generated"
+echo " Combined CSV : results/controlled_benchmark.csv ($COMBINED_ROWS rows)"
+echo " Per-round    : results/replications/ ($PER_ROUND_COUNT files)"
 echo ""
-echo " Next: python3 $REPO/compute_ci.py"
+echo " Analyse:"
+echo "   python3 $REPO/compute_ci.py --shuffled results/controlled_benchmark.csv"
+echo "   python3 $REPO/compute_ci.py --dir results/replications"
 echo "========================================================="
