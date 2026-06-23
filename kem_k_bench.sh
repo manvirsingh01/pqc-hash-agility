@@ -129,6 +129,22 @@ for k in "${K_VALUES[@]}"; do
   fi
 done
 
+# Auto-include standard NIST k values (2,3,4) for complete comparison
+HAVE_2=0; HAVE_3=0; HAVE_4=0
+for k in "${K_VALUES[@]}"; do
+  [ "$k" = "2" ] && HAVE_2=1
+  [ "$k" = "3" ] && HAVE_3=1
+  [ "$k" = "4" ] && HAVE_4=1
+done
+ADDED=""
+[ "$HAVE_2" = "0" ] && K_VALUES+=(2) && ADDED="$ADDED 2"
+[ "$HAVE_3" = "0" ] && K_VALUES+=(3) && ADDED="$ADDED 3"
+[ "$HAVE_4" = "0" ] && K_VALUES+=(4) && ADDED="$ADDED 4"
+if [ -n "$ADDED" ]; then
+  echo ""
+  echo "  [auto] Added standard NIST k values:$ADDED (for complete comparison)"
+fi
+
 RUNS_PER_K=$(( ${#BACKENDS[@]} * 2 ))
 TOTAL=$(( ${#K_VALUES[@]} * RUNS_PER_K ))
 

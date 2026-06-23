@@ -1190,6 +1190,7 @@ static void print_mem_energy(const char *label,
 
 typedef struct {
     const char   *name;
+    int           correctness_pass;  /* 1 if round-trip self-test passed */
     bench_stats_t keygen;
     bench_stats_t encaps;
     bench_stats_t decaps;
@@ -1277,6 +1278,19 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
         goto kem_cleanup;
     }
 
+    /* Correctness self-test: keygen → encaps → decaps → shared secret match */
+    {
+        uint8_t *ss2 = malloc(kem->length_shared_secret);
+        if (ss2 &&
+            OQS_KEM_keypair(kem, pk, sk) == OQS_SUCCESS &&
+            OQS_KEM_encaps(kem, ct, ss, pk) == OQS_SUCCESS &&
+            OQS_KEM_decaps(kem, ss2, ct, sk) == OQS_SUCCESS &&
+            memcmp(ss, ss2, kem->length_shared_secret) == 0) {
+            result.correctness_pass = 1;
+        }
+        free(ss2);
+    }
+
     uint64_t total_iters  = BENCH_ITERATIONS + BENCH_WARMUP;
     uint64_t *cycles_kg   = malloc(total_iters * sizeof(uint64_t));
     uint64_t *cycles_enc  = malloc(total_iters * sizeof(uint64_t));
@@ -1345,7 +1359,9 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   kem->length_public_key + kem->length_secret_key,
                   (double)(wall_end - wall_start));
 
-    /* TIER 11/12: memory footprint (single representative call) + energy proxy. */
+    /* TIER 11/12: memory footprint + energy proxy.
+     * Run 3 warmup calls before the probe to exclude first-time library init. */
+    for (int mw = 0; mw < 3; mw++) OQS_KEM_keypair(kem, pk, sk);
     {
         kem_keygen_ctx_t kctx = { kem, pk, sk };
         mem_profile_op(kem_keygen_probe, &kctx, &result.mem_keygen);
@@ -1385,6 +1401,7 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   kem->length_ciphertext + kem->length_shared_secret,
                   (double)(wall_end - wall_start));
 
+    for (int mw = 0; mw < 3; mw++) OQS_KEM_encaps(kem, ct, ss, pk);
     {
         kem_encaps_ctx_t kctx = { kem, ct, ss, pk };
         mem_profile_op(kem_encaps_probe, &kctx, &result.mem_encaps);
@@ -1424,6 +1441,7 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   kem->length_ciphertext + kem->length_shared_secret,
                   (double)(wall_end - wall_start));
 
+    for (int mw = 0; mw < 3; mw++) OQS_KEM_decaps(kem, ss, ct, sk);
     {
         kem_decaps_ctx_t kctx = { kem, ss, ct, sk };
         mem_profile_op(kem_decaps_probe, &kctx, &result.mem_decaps);
@@ -1495,6 +1513,7 @@ static kem_bench_result_t bench_kem(const char *kem_name,
 
 typedef struct {
     const char   *name;
+    int           correctness_pass;
     bench_stats_t keygen;
     bench_stats_t sign_op;
     bench_stats_t verify;
@@ -1582,6 +1601,19 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     /* Generate a fixed test message. */
     for (int b = 0; b < BENCH_MSG_LEN; b++) msg[b] = (uint8_t)(b & 0xFF);
 
+    /* Correctness self-test: keygen → sign → verify + tamper check */
+    {
+        size_t test_siglen = 0;
+        if (OQS_SIG_keypair(sig, pk, sk) == OQS_SUCCESS &&
+            OQS_SIG_sign(sig, signature, &test_siglen, msg, BENCH_MSG_LEN, sk) == OQS_SUCCESS &&
+            OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, signature, test_siglen, pk) == OQS_SUCCESS) {
+            msg[0] ^= 0xFF;
+            OQS_STATUS tamper = OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, signature, test_siglen, pk);
+            msg[0] ^= 0xFF;
+            result.correctness_pass = (tamper == OQS_ERROR) ? 1 : 0;
+        }
+    }
+
     uint64_t total_iters   = BENCH_ITERATIONS + BENCH_WARMUP;
     uint64_t *cycles_kg    = malloc(total_iters * sizeof(uint64_t));
     uint64_t *cycles_sign  = malloc(total_iters * sizeof(uint64_t));
@@ -1638,6 +1670,7 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   sig->length_public_key + sig->length_secret_key,
                   (double)(wall_end - wall_start));
 
+    for (int mw = 0; mw < 3; mw++) OQS_SIG_keypair(sig, pk, sk);
     {
         sig_keygen_ctx_t sctx = { sig, pk, sk };
         mem_profile_op(sig_keygen_probe, &sctx, &result.mem_keygen);
@@ -1684,6 +1717,7 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   sig->length_signature,
                   (double)(wall_end - wall_start));
 
+    for (int mw = 0; mw < 3; mw++) OQS_SIG_sign(sig, signature, &sig_len, msg, BENCH_MSG_LEN, sk);
     {
         size_t probe_sig_len = sig_len;
         sig_sign_ctx_t sctx = { sig, signature, &probe_sig_len, msg, BENCH_MSG_LEN, sk };
@@ -1726,6 +1760,7 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   sig->length_signature,
                   (double)(wall_end - wall_start));
 
+    for (int mw = 0; mw < 3; mw++) OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, signature, sig_len, pk);
     {
         sig_verify_ctx_t sctx = { sig, msg, BENCH_MSG_LEN, signature, sig_len, pk };
         mem_profile_op(sig_verify_probe, &sctx, &result.mem_verify);
@@ -1972,6 +2007,7 @@ static void csv_open(int append) {
     }
     fprintf(csv_fp,
             "algorithm,operation,hash_backend,keccak_rounds,fips_compliant,"
+            "correctness,"
             "counter_type,"
             "n_iterations,median_cycles,q1_cycles,q3_cycles,iqr_cycles,"
             "p95_cycles,p99_cycles,min_cycles,max_cycles,"
@@ -1988,6 +2024,7 @@ static void csv_open(int append) {
 
 static void csv_write_stats(const char            *algo,
                             const char            *op,
+                            int                    correctness,
                             const bench_stats_t   *s,
                             size_t                 pk_b,
                             size_t                 sk_b,
@@ -2001,6 +2038,7 @@ static void csv_write_stats(const char            *algo,
     if (!csv_fp) return;
     fprintf(csv_fp,
             "%s,%s,\"%s\",%d,%d,"
+            "%s,"
             "\"%s\","
             "%"PRIu64","
             "%.0f,%.0f,%.0f,%.0f,"
@@ -2016,6 +2054,7 @@ static void csv_write_stats(const char            *algo,
             "%.2f,"
             "%.4f,%d\n",
             algo, op, HASH_BACKEND_TAG, HASH_ROUNDS, FIPS_COMPLIANT,
+            correctness ? "PASS" : "FAIL",
             get_cycle_counter_type(),
             s->n,
             s->median, s->q1, s->q3, s->iqr,
@@ -2413,15 +2452,15 @@ int main(int argc, char *argv[]) {
             print_kem_report(&kr, run_dudect, run_stack);
 
             /* Write to CSV. */
-            csv_write_stats(kr.name, "KeyGen", &kr.keygen,
+            csv_write_stats(kr.name, "KeyGen", kr.correctness_pass, &kr.keygen,
                             kr.pk_bytes, kr.sk_bytes, kr.ct_bytes, kr.ss_bytes,
                             kr.nist_level, kr.stack_hwm_keygen,
                             &kr.mem_keygen, &kr.energy_keygen);
-            csv_write_stats(kr.name, "Encaps", &kr.encaps,
+            csv_write_stats(kr.name, "Encaps", kr.correctness_pass, &kr.encaps,
                             kr.pk_bytes, kr.sk_bytes, kr.ct_bytes, kr.ss_bytes,
                             kr.nist_level, kr.stack_hwm_encaps,
                             &kr.mem_encaps, &kr.energy_encaps);
-            csv_write_stats(kr.name, "Decaps", &kr.decaps,
+            csv_write_stats(kr.name, "Decaps", kr.correctness_pass, &kr.decaps,
                             kr.pk_bytes, kr.sk_bytes, kr.ct_bytes, kr.ss_bytes,
                             kr.nist_level, kr.stack_hwm_decaps,
                             &kr.mem_decaps, &kr.energy_decaps);
@@ -2540,15 +2579,15 @@ int main(int argc, char *argv[]) {
 #endif
             print_sig_report(&sr, run_dudect, run_stack);
 
-            csv_write_stats(sr.name, "KeyGen", &sr.keygen,
+            csv_write_stats(sr.name, "KeyGen", sr.correctness_pass, &sr.keygen,
                             sr.pk_bytes, sr.sk_bytes, sr.sig_bytes, 0,
                             sr.nist_level, sr.stack_hwm_keygen,
                             &sr.mem_keygen, &sr.energy_keygen);
-            csv_write_stats(sr.name, "Sign",   &sr.sign_op,
+            csv_write_stats(sr.name, "Sign",   sr.correctness_pass, &sr.sign_op,
                             sr.pk_bytes, sr.sk_bytes, sr.sig_bytes, 0,
                             sr.nist_level, sr.stack_hwm_sign,
                             &sr.mem_sign, &sr.energy_sign);
-            csv_write_stats(sr.name, "Verify", &sr.verify,
+            csv_write_stats(sr.name, "Verify", sr.correctness_pass, &sr.verify,
                             sr.pk_bytes, sr.sk_bytes, sr.sig_bytes, 0,
                             sr.nist_level, sr.stack_hwm_verify,
                             &sr.mem_verify, &sr.energy_verify);

@@ -83,7 +83,10 @@ XKCP_LIB="$ROOT/XKCP/bin/generic64/libXKCP.a"
 echo "[4/15] Building liboqs (static + shared, Release)..."
 if [ "$ARCH" = "x86_64" ]; then
   OQS_CFLAGS="-O3"
-  OQS_ARCH_FLAGS=""
+  # Explicitly disable ALL SIMD instruction sets in liboqs so SHAKE uses
+  # the same scalar Keccak as XKCP generic64. OQS_DIST_BUILD=OFF alone is
+  # not enough — cmake auto-detects AVX2 at compile time on x86_64.
+  OQS_ARCH_FLAGS="-DOQS_USE_AVX_INSTRUCTIONS=OFF -DOQS_USE_AVX2_INSTRUCTIONS=OFF -DOQS_USE_AVX512_INSTRUCTIONS=OFF -DOQS_USE_AES_INSTRUCTIONS=OFF -DOQS_USE_SSE2_INSTRUCTIONS=OFF -DOQS_USE_BMI1_INSTRUCTIONS=OFF -DOQS_USE_BMI2_INSTRUCTIONS=OFF -DOQS_USE_PCLMULQDQ_INSTRUCTIONS=OFF -DOQS_USE_POPCNT_INSTRUCTIONS=OFF -DOQS_USE_ADX_INSTRUCTIONS=OFF"
 else
   OQS_CFLAGS="-O3 -march=native"
   # Disable aarch64-optimized assembly (assembler compatibility + scalar parity)

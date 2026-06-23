@@ -32,6 +32,7 @@ WARMUP=20
 NO_HARAKA=0
 CUSTOM_ONLY=0
 DEFAULT_ONLY=0
+ROUNDS=1
 REPO="$(cd "$(dirname "$0")" && pwd)"
 RESULTS_DIR="$(pwd)/results"
 mkdir -p "$RESULTS_DIR"
@@ -41,6 +42,7 @@ while [ $# -gt 0 ]; do
     --iters)        ITERS="$2";  shift 2 ;;
     --liters)       LITERS="$2"; shift 2 ;;
     --warmup)       WARMUP="$2"; shift 2 ;;
+    --rounds)       ROUNDS="$2"; shift 2 ;;
     --no-haraka)    NO_HARAKA=1; shift ;;
     --custom-only)  CUSTOM_ONLY=1; shift ;;
     --default-only) DEFAULT_ONLY=1; shift ;;
@@ -59,9 +61,13 @@ echo " Arch          : $ARCH"
 echo " Custom iters  : $ITERS  (per operation)"
 echo " Default iters : $LITERS (per operation)"
 echo " Warmup        : $WARMUP"
+echo " Rounds        : $ROUNDS  (independent runs for CI)"
 echo " Output:"
 echo "   results/custom_benchmark.csv           — our 6 backends × 6 algorithms"
 echo "   results/library_default_benchmark.csv  — all liboqs built-in algorithms"
+if [ "$ROUNDS" -gt 1 ]; then
+echo "   results/replications/roundN_*.csv      — per-round data for CI analysis"
+fi
 echo "========================================================="
 echo ""
 
@@ -85,12 +91,6 @@ echo ""
 # ══════════════════════════════════════════════════════════════════════
 if [ "$DEFAULT_ONLY" = "0" ]; then
 
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo " CSV 1/2: results/custom_benchmark.csv"
-  echo " (our forked PQClean backends, correctness + timing)"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-
   # Check binaries
   for b in bench_shake bench_turboshake bench_k12 bench_blake3 bench_xoodyak; do
     [ -x "./$b" ] || { echo "ERROR: $b not found — run bash setup.sh first"; exit 1; }
@@ -100,52 +100,80 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
     NO_HARAKA=1
   fi
 
-  rm -f "$RESULTS_DIR/custom_benchmark.csv"
+  if [ "$ROUNDS" -gt 1 ]; then
+    mkdir -p "$RESULTS_DIR/replications"
+  fi
 
-  echo "--- [1/6] SHAKE  (FIPS-approved SHAKE/SHA-3, liboqs built-in) ---"
-  ./bench_shake \
-    --iterations "$ITERS" \
-    --warmup "$WARMUP"
-
-  echo ""
-  echo "--- [2/6] TurboSHAKE  (n_r=12, RFC 9861) ---"
-  ./bench_turboshake \
-    --iterations "$ITERS" \
-    --warmup "$WARMUP" \
-    --csv-append
-
-  echo ""
-  echo "--- [3/6] KangarooTwelve  (tree hash, RFC 9861) ---"
-  ./bench_k12 \
-    --iterations "$ITERS" \
-    --warmup "$WARMUP" \
-    --csv-append
-
-  echo ""
-  echo "--- [4/6] BLAKE3  (portable XOF, all SIMD disabled) ---"
-  ./bench_blake3 \
-    --iterations "$ITERS" \
-    --warmup "$WARMUP" \
-    --csv-append
-
-  echo ""
-  echo "--- [5/6] Xoodyak  (Xoodoo[12] permutation) ---"
-  ./bench_xoodyak \
-    --iterations "$ITERS" \
-    --warmup "$WARMUP" \
-    --csv-append
-
-  if [ "$NO_HARAKA" = "0" ]; then
+  for ROUND in $(seq 1 "$ROUNDS"); do
+    if [ "$ROUNDS" -gt 1 ]; then
+      echo ""
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo " Round $ROUND / $ROUNDS — custom benchmark"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    else
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+      echo " CSV 1/2: results/custom_benchmark.csv"
+      echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    fi
     echo ""
-    echo "--- [6/6] Haraka  (AES-NI on x86_64 / NEON on aarch64) ---"
-    ./bench_haraka \
+
+    rm -f pqc_benchmark_results.csv
+
+    echo "--- [1/6] SHAKE  (FIPS-approved SHAKE/SHA-3, liboqs built-in) ---"
+    ./bench_shake \
+      --iterations "$ITERS" \
+      --warmup "$WARMUP"
+
+    echo ""
+    echo "--- [2/6] TurboSHAKE  (n_r=12, RFC 9861) ---"
+    ./bench_turboshake \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append
-  else
+
     echo ""
-    echo "--- [6/6] Haraka  SKIPPED ---"
-  fi
+    echo "--- [3/6] KangarooTwelve  (tree hash, RFC 9861) ---"
+    ./bench_k12 \
+      --iterations "$ITERS" \
+      --warmup "$WARMUP" \
+      --csv-append
+
+    echo ""
+    echo "--- [4/6] BLAKE3  (portable XOF, all SIMD disabled) ---"
+    ./bench_blake3 \
+      --iterations "$ITERS" \
+      --warmup "$WARMUP" \
+      --csv-append
+
+    echo ""
+    echo "--- [5/6] Xoodyak  (Xoodoo[12] permutation) ---"
+    ./bench_xoodyak \
+      --iterations "$ITERS" \
+      --warmup "$WARMUP" \
+      --csv-append
+
+    if [ "$NO_HARAKA" = "0" ]; then
+      echo ""
+      echo "--- [6/6] Haraka  (AES-NI on x86_64 / NEON on aarch64) ---"
+      ./bench_haraka \
+        --iterations "$ITERS" \
+        --warmup "$WARMUP" \
+        --csv-append
+    else
+      echo ""
+      echo "--- [6/6] Haraka  SKIPPED ---"
+    fi
+
+    if [ "$ROUNDS" -gt 1 ]; then
+      [ -f pqc_benchmark_results.csv ] && cp pqc_benchmark_results.csv \
+        "$RESULTS_DIR/replications/round${ROUND}_custom.csv"
+      echo "  [saved] replications/round${ROUND}_custom.csv"
+      if [ "$ROUND" -lt "$ROUNDS" ]; then
+        echo "  [cooldown] 5s..."
+        sleep 5
+      fi
+    fi
+  done
 
   [ -f pqc_benchmark_results.csv ] && mv pqc_benchmark_results.csv "$RESULTS_DIR/custom_benchmark.csv"
 
