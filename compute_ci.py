@@ -46,33 +46,52 @@ def t_ppf(alpha, df):
 
 
 def load_replications(data_dir):
-    """Load all round CSV files and combine them."""
+    """Load round CSV files from replications/ directory."""
     pattern = os.path.join(data_dir, "round*_bench_*.csv")
     files = sorted(glob.glob(pattern))
     if not files:
-        print(f"ERROR: No CSV files found matching {pattern}")
+        pattern = os.path.join(data_dir, "round*_custom.csv")
+        files = sorted(glob.glob(pattern))
+    if not files:
+        print(f"ERROR: No round CSV files found in {data_dir}")
         sys.exit(1)
 
+    import csv as csvmod
     rows = []
     for f in files:
         m = re.search(r'round(\d+)', os.path.basename(f))
         round_num = int(m.group(1)) if m else 0
         with open(f) as fh:
-            header = None
-            for line in fh:
-                line = line.strip()
-                if not line:
+            reader = csvmod.reader(fh)
+            header = [h.strip() for h in next(reader)]
+            for vals in reader:
+                if len(vals) < len(header):
                     continue
-                if header is None:
-                    header = [h.strip('"') for h in line.split(',')]
-                    continue
-                vals = line.split(',')
                 row = dict(zip(header, vals))
                 row['round'] = round_num
                 row['source_file'] = os.path.basename(f)
                 rows.append(row)
 
     print(f"Loaded {len(rows)} data rows from {len(files)} files")
+    return rows
+
+
+def load_shuffled_csv(csv_path):
+    """Load the single combined CSV from bench_shuffled.sh (has round column)."""
+    import csv as csvmod
+    rows = []
+    with open(csv_path) as fh:
+        reader = csvmod.reader(fh)
+        header = next(reader)
+        header = [h.strip() for h in header]
+        for vals in reader:
+            if len(vals) < len(header):
+                continue
+            row = dict(zip(header, vals))
+            rows.append(row)
+
+    n_rounds = len(set(row.get('round', '0') for row in rows))
+    print(f"Loaded {len(rows)} data rows from {csv_path} ({n_rounds} rounds)")
     return rows
 
 
@@ -193,11 +212,16 @@ def main():
                         help='Baseline backend name for effect comparison')
     parser.add_argument('--output', default='results',
                         help='Output directory for summary CSVs')
+    parser.add_argument('--shuffled', default=None,
+                        help='Path to shuffled_benchmark.csv (single-file mode)')
     args = parser.parse_args()
 
     os.makedirs(args.output, exist_ok=True)
 
-    rows = load_replications(args.dir)
+    if args.shuffled:
+        rows = load_shuffled_csv(args.shuffled)
+    else:
+        rows = load_replications(args.dir)
     summary = compute_summary(rows, args.alpha)
 
     summary_cols = [
