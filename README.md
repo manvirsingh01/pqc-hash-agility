@@ -67,7 +67,12 @@ sudo bash bench_controlled.sh     # 10 rounds, CPU pinned, turbo off
 python3 compute_ci.py             # compute 95% CI and effect sizes
 # Produces: results/summary_with_ci.csv + results/effect_sizes.csv
 
-# 9. (Optional) Run correctness-only tests (no timing)
+# 9. (Optional) Shuffled benchmark — randomised backend order each round
+sudo bash bench_shuffled.sh       # 10 rounds, shuffled order, single CSV
+python3 compute_ci.py --shuffled results/shuffled_benchmark.csv
+# Produces: results/shuffled_benchmark.csv (one file, all rounds + run_order)
+
+# 10. (Optional) Run correctness-only tests (no timing)
 ./bench_shake --correctness-only --trials 1000
 ```
 
@@ -99,6 +104,7 @@ pqc-hash-agility/
 ├── pure_bench.sh             # benchmark stock liboqs (no custom backends)
 ├── pure_system_info.sh       # system info for the pure benchmark
 ├── bench_controlled.sh       # controlled runner: CPU pinning, replication, CI
+├── bench_shuffled.sh         # shuffled-order runner: randomised backend order per round
 ├── compute_ci.py             # compute 95% CI and effect sizes from replications
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
@@ -139,6 +145,7 @@ pqc-hash-agility/
 │   ├── system_info.txt
 │   ├── summary_with_ci.csv       # (from compute_ci.py) per-op summary with 95% CI
 │   ├── effect_sizes.csv          # (from compute_ci.py) backend comparisons
+│   ├── shuffled_benchmark.csv     # (from bench_shuffled.sh) all rounds, single file
 │   ├── replications/             # (from bench_controlled.sh) per-round CSVs
 │   ├── pure/                     # (from pure_bench.sh) stock liboqs benchmark
 │   │   ├── pure_benchmark.csv
@@ -210,6 +217,8 @@ Use `bench_controlled.sh` for publication-quality results:
 4. 10 independent rounds with 5,000 iterations each
 5. `compute_ci.py` produces 95% confidence intervals and flags cells where CI > 5% of median
 6. Effect sizes (speedup claims) are only reported when confidence intervals do not overlap
+
+Use `bench_shuffled.sh` for the strongest noise reduction: it **randomises backend execution order** each round, eliminating ordering bias (cache warming, thermal throttle, OS scheduler drift). The `run_order` column in the output lets you verify that first-vs-last position doesn't affect results.
 
 ### Memory Profiling
 
@@ -425,6 +434,68 @@ The `type` column contains `library` (default params) or `custom` (user-selected
 
 ---
 
+### bench_controlled.sh — Controlled Multi-Round Benchmark
+
+Runs the full custom benchmark multiple times with CPU noise controls for statistically rigorous results. Fixed backend order each round. Per-round CSVs saved for CI analysis.
+
+```bash
+sudo bash bench_controlled.sh                          # 10 rounds, 5000 iters
+sudo bash bench_controlled.sh --rounds 20 --iters 10000 --core 2
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--rounds N` | 10 | Independent benchmark rounds |
+| `--iters N` | 5000 | Iterations per operation per round |
+| `--warmup N` | 500 | Warmup iterations |
+| `--core N` | 0 | CPU core to pin to (`taskset -c N`) |
+| `--no-lock` | — | Skip CPU governor and turbo controls |
+
+**CPU controls applied:** frequency governor locked to `performance`, Intel turbo boost disabled, process pinned to a single core. 5-second cooldown between rounds.
+
+Output: `results/replications/round1_custom.csv`, `round2_custom.csv`, ... Analyse with `python3 compute_ci.py`.
+
+---
+
+### bench_shuffled.sh — Shuffled-Order Multi-Round Benchmark
+
+Same CPU controls as `bench_controlled.sh`, but **randomises the backend execution order** in each round. This eliminates systematic ordering bias — if SHAKE always runs first, it might benefit from cold caches while later backends hit thermal throttle, or vice versa.
+
+```bash
+sudo bash bench_shuffled.sh                            # 10 rounds, shuffled
+sudo bash bench_shuffled.sh --rounds 20 --iters 10000
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--rounds N` | 10 | Independent benchmark rounds |
+| `--iters N` | 5000 | Iterations per operation per round |
+| `--warmup N` | 500 | Warmup iterations |
+| `--core N` | 0 | CPU core to pin to |
+| `--no-lock` | — | Skip CPU governor and turbo controls |
+| `--no-haraka` | — | Skip Haraka backend |
+| `--csv PATH` | `results/shuffled_benchmark.csv` | Output path |
+
+Output: **single CSV file** with `round` and `run_order` columns:
+
+```
+round,run_order,backend_binary,algorithm,operation,hash_backend,...
+1,1,bench_blake3,ML-KEM-512,KeyGen,"BLAKE3 ...",7,0,...
+1,2,bench_shake,ML-KEM-512,KeyGen,"SHAKE ...",24,1,...
+2,1,bench_xoodyak,ML-KEM-512,KeyGen,"Xoodyak ...",12,0,...
+2,2,bench_turboshake,ML-KEM-512,KeyGen,"TurboSHAKE ...",12,0,...
+...
+```
+
+Analyse with:
+```bash
+python3 compute_ci.py --shuffled results/shuffled_benchmark.csv
+```
+
+The `run_order` column lets you check whether running first vs last affects performance — if it does, you have an ordering-bias problem that only shuffling can detect.
+
+---
+
 ### system_info.sh / pure_system_info.sh — Hardware + Build Information
 
 Generated automatically by benchmark scripts. Produces `results/system_info.txt` (or `results/pure/pure_system_info.txt`):
@@ -510,6 +581,10 @@ Variable number of rows depending on chosen parameter combinations and backends.
 ### `results/pure/pure_benchmark.csv`
 
 18 rows (6 algorithms x 3 operations). Stock liboqs implementations only — no custom backends. Columns: `algorithm, type, operation, correctness, iterations, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns, ops_per_sec, pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes, nist_level`. See [pure_bench.sh](#pure_benchsh--pure-stock-implementation-benchmark) for details.
+
+### `results/shuffled_benchmark.csv`
+
+N×108 rows (N rounds × 6 backends × 6 algorithms × 3 operations). Same data as `custom_benchmark.csv` but with multiple rounds and randomised backend order. Extra columns: `round` (1..N), `run_order` (position within that round), `backend_binary` (which binary ran). See [bench_shuffled.sh](#bench_shuffledsh--shuffled-order-multi-round-benchmark) for details.
 
 ---
 
