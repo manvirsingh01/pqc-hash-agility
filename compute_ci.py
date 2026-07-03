@@ -95,11 +95,39 @@ def load_shuffled_csv(csv_path):
     return rows
 
 
+# Suffixes the PQClean-fork adapters append to algorithm names
+# (e.g. "ML-KEM-512-TurboSHAKE"). Longest first so "-turboshake" is
+# stripped before "-shake" gets a chance to match its tail.
+BACKEND_SUFFIXES = ('-turboshake', '-xoodyak', '-haraka', '-blake3',
+                    '-shake', '-k12')
+
+
+def normalize_algo(name):
+    """Strip the backend suffix from an algorithm name so rows from
+    different backends group under the same algorithm key
+    ("ML-KEM-512-TurboSHAKE" and "ML-KEM-512" both -> "ML-KEM-512")."""
+    n = name.strip().strip('"')
+    low = n.lower()
+    for suf in BACKEND_SUFFIXES:
+        if low.endswith(suf):
+            return n[:-len(suf)]
+    return n
+
+
+def is_baseline_backend(backend_name, baseline):
+    """True if backend_name's leading token equals the baseline name.
+    Token match (not substring) so --baseline SHAKE matches
+    "SHAKE (FIPS 202, ...)" but neither "TurboSHAKE (...)" nor the
+    "SHAKE-liboqs (...)" production-reference series."""
+    tok = backend_name.strip().strip('"').split(' ')[0].split('(')[0]
+    return tok.lower() == baseline.lower()
+
+
 def compute_summary(rows, alpha=0.05):
     """Compute per-(algorithm, operation, backend) summary with CI."""
     groups = {}
     for row in rows:
-        algo = row.get('algorithm', '')
+        algo = normalize_algo(row.get('algorithm', ''))
         op = row.get('operation', '')
         backend = row.get('hash_backend', '').strip('"')
         key = (backend, algo, op)
@@ -150,13 +178,13 @@ def compute_effects(summary, baseline='SHAKE', alpha=0.05):
     """Compute effect sizes (speedup) between baseline and each other backend."""
     baseline_map = {}
     for row in summary:
-        if baseline.lower() in row['backend'].lower():
+        if is_baseline_backend(row['backend'], baseline):
             key = (row['algorithm'], row['operation'])
             baseline_map[key] = row
 
     effects = []
     for row in summary:
-        if baseline.lower() in row['backend'].lower():
+        if is_baseline_backend(row['backend'], baseline):
             continue
 
         key = (row['algorithm'], row['operation'])
@@ -193,12 +221,15 @@ def compute_effects(summary, baseline='SHAKE', alpha=0.05):
 
 
 def write_csv(filename, rows, columns):
-    """Write a list of dicts to CSV."""
-    with open(filename, 'w') as f:
-        f.write(','.join(columns) + '\n')
+    """Write a list of dicts to CSV. Uses the csv module so backend names
+    containing commas (e.g. "SHAKE (FIPS 202, n_r=24, ...)") stay quoted
+    and the columns stay aligned."""
+    import csv as csvmod
+    with open(filename, 'w', newline='') as f:
+        w = csvmod.writer(f)
+        w.writerow(columns)
         for row in rows:
-            vals = [str(row.get(c, '')) for c in columns]
-            f.write(','.join(vals) + '\n')
+            w.writerow([row.get(c, '') for c in columns])
     print(f"Wrote: {filename} ({len(rows)} rows)")
 
 

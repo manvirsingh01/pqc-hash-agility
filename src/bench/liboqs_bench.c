@@ -22,7 +22,12 @@
 
 #include <oqs/oqs.h>
 
-/* adapter headers for our 5 custom backends (shake uses OQS_KEM_new directly) */
+/* adapter headers for the six PQClean-fork backends (shake included: the
+ * baseline is the same PQClean fork with upstream symmetric-shake.c, so
+ * comparisons isolate the hash; liboqs's own code runs as a separate
+ * "liboqs-ref" production-reference series) */
+#include "pqc_shake_kem.h"
+#include "pqc_shake_dsa.h"
 #include "pqc_turboshake_kem.h"
 #include "pqc_turboshake_dsa.h"
 #include "pqc_k12_kem.h"
@@ -374,18 +379,18 @@ typedef struct {
     sig_ctor    sig[3];   /* 44,  65,  87   */
 } Backend;
 
-/* shake uses liboqs OQS_KEM_new / OQS_SIG_new — wrap with thin helpers */
-static OQS_KEM *shake_kem_512_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_512);  }
-static OQS_KEM *shake_kem_768_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_768);  }
-static OQS_KEM *shake_kem_1024_new(void) { return OQS_KEM_new(OQS_KEM_alg_ml_kem_1024); }
-static OQS_SIG *shake_sig_44_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);   }
-static OQS_SIG *shake_sig_65_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_65);   }
-static OQS_SIG *shake_sig_87_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_87);   }
+/* liboqs-ref uses liboqs OQS_KEM_new / OQS_SIG_new — wrap with thin helpers */
+static OQS_KEM *liboqs_kem_512_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_512);  }
+static OQS_KEM *liboqs_kem_768_new(void)  { return OQS_KEM_new(OQS_KEM_alg_ml_kem_768);  }
+static OQS_KEM *liboqs_kem_1024_new(void) { return OQS_KEM_new(OQS_KEM_alg_ml_kem_1024); }
+static OQS_SIG *liboqs_sig_44_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_44);   }
+static OQS_SIG *liboqs_sig_65_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_65);   }
+static OQS_SIG *liboqs_sig_87_new(void)   { return OQS_SIG_new(OQS_SIG_alg_ml_dsa_87);   }
 
 static const Backend backends[] = {
     { "shake",
-      { shake_kem_512_new,                   shake_kem_768_new,                   shake_kem_1024_new                   },
-      { shake_sig_44_new,                    shake_sig_65_new,                    shake_sig_87_new                     } },
+      { OQS_KEM_ml_kem_512_shake_new,        OQS_KEM_ml_kem_768_shake_new,        OQS_KEM_ml_kem_1024_shake_new        },
+      { OQS_SIG_ml_dsa_44_shake_new,         OQS_SIG_ml_dsa_65_shake_new,         OQS_SIG_ml_dsa_87_shake_new          } },
     { "turboshake",
       { OQS_KEM_ml_kem_512_turboshake_new,   OQS_KEM_ml_kem_768_turboshake_new,   OQS_KEM_ml_kem_1024_turboshake_new   },
       { OQS_SIG_ml_dsa_44_turboshake_new,    OQS_SIG_ml_dsa_65_turboshake_new,    OQS_SIG_ml_dsa_87_turboshake_new     } },
@@ -401,6 +406,10 @@ static const Backend backends[] = {
     { "haraka",
       { OQS_KEM_ml_kem_512_haraka_new,       OQS_KEM_ml_kem_768_haraka_new,       OQS_KEM_ml_kem_1024_haraka_new       },
       { OQS_SIG_ml_dsa_44_haraka_new,        OQS_SIG_ml_dsa_65_haraka_new,        OQS_SIG_ml_dsa_87_haraka_new         } },
+    /* production reference — liboqs's own ML-KEM/ML-DSA, separate series */
+    { "liboqs-ref",
+      { liboqs_kem_512_new,                  liboqs_kem_768_new,                  liboqs_kem_1024_new                  },
+      { liboqs_sig_44_new,                   liboqs_sig_65_new,                   liboqs_sig_87_new                    } },
 };
 #define N_BACKENDS (int)(sizeof(backends)/sizeof(backends[0]))
 
@@ -430,15 +439,15 @@ int main(int argc, char **argv) {
     if (!g_csv) { perror(csv_path); return 1; }
     csv_header();
 
-    printf("=== Default Library Benchmark — All 6 Backends via OQS API ===\n");
-    printf("Backends  : shake, turboshake, k12, blake3, xoodyak, haraka\n");
+    printf("=== Default Library Benchmark — All Backends via OQS API ===\n");
+    printf("Backends  : shake (PQClean baseline), turboshake, k12, blake3, xoodyak, haraka, liboqs-ref\n");
     printf("Algorithms: ML-KEM-512/768/1024  +  ML-DSA-44/65/87\n");
     printf("Iterations: %d   Warmup: %d   CSV: %s\n\n", iters, warmup, csv_path);
 
     for (int b = 0; b < N_BACKENDS; b++) {
         const Backend *bk = &backends[b];
 
-        printf("━━━ [%d/6] %s ━━━\n", b+1, bk->name);
+        printf("━━━ [%d/%d] %s ━━━\n", b+1, N_BACKENDS, bk->name);
 
         printf("  KEM:\n");
         for (int k = 0; k < 3; k++)

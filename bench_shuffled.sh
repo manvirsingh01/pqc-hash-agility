@@ -69,6 +69,11 @@ done
 if [ "$NO_HARAKA" = "0" ] && [ -x "./bench_haraka" ]; then
   BACKENDS+=("bench_haraka")
 fi
+# liboqs production reference — separate series (hash_backend "SHAKE-liboqs"),
+# shuffled along with the rest but not part of the hash-substitution baseline.
+if [ -x "./bench_liboqs" ]; then
+  BACKENDS+=("bench_liboqs")
+fi
 
 if [ ${#BACKENDS[@]} -eq 0 ]; then
   echo "ERROR: No benchmark binaries found. Run setup.sh first."

@@ -3,12 +3,17 @@
  *                  PQC algorithms × all hash backends.
  *
  * Backends:
- *   shake      liboqs built-in  (standard FIPS SHAKE / SHA3)
+ *   shake      PQClean fork     (FIPS SHAKE / SHA3, symmetric-shake.c —
+ *                                hash-substitution BASELINE, compiled
+ *                                identically to the five backends below)
  *   turboshake PQClean fork     (TurboSHAKE128/256, n_r=12)
  *   k12        PQClean fork     (KangarooTwelve)
  *   blake3     PQClean fork     (BLAKE3 XOF)
  *   xoodyak    PQClean fork     (Xoodyak / Xoodoo[12])
  *   haraka     PQClean fork     (Haraka-256/512 AES)
+ *   liboqs-ref liboqs built-in  (separately engineered ML-KEM/ML-DSA —
+ *                                "production reference" series, not part
+ *                                of the hash-substitution comparison)
  *
  * Algorithms:
  *   ML-KEM-512 / 768 / 1024   (KEM: keygen, encaps, decaps)
@@ -32,6 +37,8 @@
 
 #include <oqs/oqs.h>
 
+#include "pqc_shake_kem.h"
+#include "pqc_shake_dsa.h"
 #include "pqc_turboshake_kem.h"
 #include "pqc_turboshake_dsa.h"
 #include "pqc_k12_kem.h"
@@ -428,15 +435,17 @@ int main(int argc, char **argv) {
     printf("Iterations: %d   Warmup: %d   CSV: %s\n\n", iters, warmup, csv_path);
 
     /* ----------------------------------------------------------------
-     * SHAKE baseline — liboqs built-in implementations
+     * SHAKE baseline — PQClean fork, symmetric-shake.c compiled
+     * identically to the five substituted backends. Comparing the
+     * backends below against this row isolates the hash function.
      * --------------------------------------------------------------- */
-    printf("[Backend: shake  — liboqs built-in]\n");
-    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_512),  "shake", iters, warmup, "ML-KEM-512");
-    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_768),  "shake", iters, warmup, "ML-KEM-768");
-    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_1024), "shake", iters, warmup, "ML-KEM-1024");
-    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_44),   "shake", iters, warmup, "ML-DSA-44");
-    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_65),   "shake", iters, warmup, "ML-DSA-65");
-    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_87),   "shake", iters, warmup, "ML-DSA-87");
+    printf("[Backend: shake  — PQClean fork baseline]\n");
+    bench_kem(OQS_KEM_ml_kem_512_shake_new(),   "shake", iters, warmup, "ML-KEM-512");
+    bench_kem(OQS_KEM_ml_kem_768_shake_new(),   "shake", iters, warmup, "ML-KEM-768");
+    bench_kem(OQS_KEM_ml_kem_1024_shake_new(),  "shake", iters, warmup, "ML-KEM-1024");
+    bench_sig(OQS_SIG_ml_dsa_44_shake_new(),    "shake", iters, warmup, "ML-DSA-44");
+    bench_sig(OQS_SIG_ml_dsa_65_shake_new(),    "shake", iters, warmup, "ML-DSA-65");
+    bench_sig(OQS_SIG_ml_dsa_87_shake_new(),    "shake", iters, warmup, "ML-DSA-87");
 
     /* ----------------------------------------------------------------
      * TurboSHAKE
@@ -496,6 +505,19 @@ int main(int argc, char **argv) {
     } else {
         printf("\n[Backend: haraka  — SKIPPED (--no-haraka)]\n");
     }
+
+    /* ----------------------------------------------------------------
+     * liboqs production reference — liboqs's own ML-KEM/ML-DSA (same
+     * FIPS SHAKE, different engineering). Separate series; NOT the
+     * hash-substitution baseline.
+     * --------------------------------------------------------------- */
+    printf("\n[Backend: liboqs-ref  — liboqs built-in, production reference]\n");
+    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_512),  "liboqs-ref", iters, warmup, "ML-KEM-512");
+    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_768),  "liboqs-ref", iters, warmup, "ML-KEM-768");
+    bench_kem(OQS_KEM_new(OQS_KEM_alg_ml_kem_1024), "liboqs-ref", iters, warmup, "ML-KEM-1024");
+    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_44),   "liboqs-ref", iters, warmup, "ML-DSA-44");
+    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_65),   "liboqs-ref", iters, warmup, "ML-DSA-65");
+    bench_sig(OQS_SIG_new(OQS_SIG_alg_ml_dsa_87),   "liboqs-ref", iters, warmup, "ML-DSA-87");
 
     fclose(g_csv);
     OQS_destroy();

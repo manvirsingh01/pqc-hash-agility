@@ -119,7 +119,7 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
 
     rm -f pqc_benchmark_results.csv
 
-    echo "--- [1/6] SHAKE  (FIPS-approved SHAKE/SHA-3, liboqs built-in) ---"
+    echo "--- [1/6] SHAKE  (FIPS SHAKE/SHA-3, PQClean fork — baseline) ---"
     ./bench_shake \
       --iterations "$ITERS" \
       --warmup "$WARMUP"

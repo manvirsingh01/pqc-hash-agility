@@ -4,14 +4,17 @@ Benchmarks **ML-KEM** (FIPS 203) and **ML-DSA** (FIPS 204) across six hash backe
 
 | Backend | Hash primitive | Keccak rounds | SIMD tier | FIPS |
 |---|---|---|---|---|
-| `shake` | SHAKE128/256 — liboqs scalar Keccak | 24 | None (scalar) | Yes |
+| `shake` | SHAKE128/256 — PQClean `symmetric-shake.c` (**baseline**) | 24 | None (scalar) | Yes |
 | `turboshake` | TurboSHAKE128/256 (RFC 9861) | 12 | None (scalar) | No |
 | `k12` | KangarooTwelve (tree hash, RFC 9861) | 12 | None (scalar) | No |
 | `blake3` | BLAKE3 XOF (portable) | N/A (7) | None (all SIMD disabled) | No |
 | `xoodyak` | Xoodyak / Xoodoo\[12\] | 12 (Xoodoo) | None (scalar) | No |
 | `haraka` | Haraka-256/512 v2 (AES round) | N/A (5) | AES-NI / NEON | No |
+| `liboqs` | SHAKE128/256 — liboqs built-in ML-KEM/ML-DSA | 24 | None (scalar) | Yes |
 
-> **Implementation parity:** All backends are compiled at the same scalar optimisation tier (`-O3`, no `-march=native`). liboqs is built with `OQS_DIST_BUILD=OFF` and `OQS_USE_OPENSSL=OFF` to force scalar Keccak. This ensures the comparison measures algorithm properties (round count, permutation) rather than SIMD vectorisation differences.
+> **Implementation parity:** The SHAKE baseline (`bench_shake`) is built from the **same PQClean fork** as the five substituted backends — the upstream `symmetric-shake.c` compiled with the identical Makefile and flags — so every backend-vs-baseline comparison measures pure hash substitution, not implementation engineering. All backends are compiled at the same scalar optimisation tier. liboqs is built with `OQS_DIST_BUILD=OFF` and `OQS_USE_OPENSSL=OFF` to force scalar Keccak.
+>
+> **Production reference:** `bench_liboqs` (hash_backend tag `SHAKE-liboqs`) runs liboqs's own separately engineered ML-KEM/ML-DSA. It is recorded as an independent series in the controlled/shuffled/wait CSVs — useful to see how the PQClean-fork code compares to a production library, but **not** part of the hash-substitution comparison and never used as the baseline by `compute_ci.py`.
 
 **Algorithms benchmarked:** ML-KEM-512 / 768 / 1024 and ML-DSA-44 / 65 / 87
 
@@ -116,8 +119,10 @@ pqc-hash-agility/
 ├── compute_ci.py             # compute 95% CI and effect sizes from replications
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
-│   ├── pqc_bench.c           # benchmark harness (compiled 6x with -DUSE_<TAG>)
-│   ├── adapters/             # OQS_KEM / OQS_SIG wrapper shims (10 adapter pairs)
+│   ├── pqc_bench.c           # benchmark harness (compiled 7x: -DUSE_<TAG> x6 + bench_liboqs)
+│   ├── adapters/             # OQS_KEM / OQS_SIG wrapper shims (12 adapter pairs)
+│   │   ├── pqc_shake_kem.{c,h}   # SHAKE baseline (PQClean fork)
+│   │   ├── pqc_shake_dsa.{c,h}
 │   │   ├── pqc_turboshake_kem.{c,h}
 │   │   ├── pqc_turboshake_dsa.{c,h}
 │   │   ├── pqc_k12_kem.{c,h}
@@ -138,7 +143,7 @@ pqc-hash-agility/
 │       └── Makefile
 ├── PQClean_custom/           # forked ML-KEM/ML-DSA backend implementations
 │   ├── crypto_kem/
-│   │   └── ml-kem-{512,768,1024}/{turboshake,k12,blake3,xoodyak,haraka}/
+│   │   └── ml-kem-{512,768,1024}/{shake,turboshake,k12,blake3,xoodyak,haraka}/
 │   └── crypto_sign/
 │       └── ml-dsa-{44,65,87}/{turboshake,k12,blake3,xoodyak,haraka}/
 ├── results/                      # all benchmark output goes here (auto-created)
@@ -268,7 +273,7 @@ Produces **two separate CSV files** in the `results/` directory, plus `system_in
 Runs all six custom backends sequentially using the per-backend binaries:
 
 ```
-bench_shake        # FIPS baseline
+bench_shake        # FIPS SHAKE baseline (PQClean fork, symmetric-shake.c)
 bench_turboshake   # appends
 bench_k12
 bench_blake3
@@ -280,9 +285,9 @@ bench_haraka       # AES-NI (x86_64) or NEON (aarch64)
 
 #### CSV 2 — `results/library_default_benchmark.csv`
 
-Tests the same **6 backends x 6 algorithms** (ML-KEM-512/768/1024 + ML-DSA-44/65/87) through the liboqs `OQS_KEM` / `OQS_SIG` adapter API. Uses our custom adapter constructors for each backend.
+Tests **7 series x 6 algorithms** (ML-KEM-512/768/1024 + ML-DSA-44/65/87) through the liboqs `OQS_KEM` / `OQS_SIG` adapter API: the six PQClean-fork backends (shake baseline included) plus the `liboqs-ref` production-reference series.
 
-108 rows with the same structure, allowing direct column-for-column comparison with `custom_benchmark.csv`.
+126 rows with the same structure, allowing direct column-for-column comparison with `custom_benchmark.csv`.
 
 #### Options
 
@@ -531,7 +536,7 @@ The `run_order` column lets you check whether running first vs last affects perf
 
 ### bench_wait.sh — Wait-Time (Cooldown-Isolated) Benchmark
 
-Third noise-reduction setup. Before **every** backend run the script idles for a configurable wait time so the CPU returns to a settled thermal baseline — each backend starts from the same cold state, removing run-to-run carryover (the main cause of drifting medians and long tails in back-to-back runs). Covers all algorithms for the library baseline (`bench_shake`) and every custom backend.
+Third noise-reduction setup. Before **every** backend run the script idles for a configurable wait time so the CPU returns to a settled thermal baseline — each backend starts from the same cold state, removing run-to-run carryover (the main cause of drifting medians and long tails in back-to-back runs). Covers all algorithms for every PQClean-fork backend (including the `bench_shake` baseline) plus the `bench_liboqs` production-reference series.
 
 ```bash
 sudo bash bench_wait.sh                       # 5 rounds, 15s wait before each run
@@ -623,11 +628,11 @@ All CSV files are written to the `results/` directory.
 
 ### `results/library_default_benchmark.csv`
 
-108 rows (same structure). Tests all 6 backends through OQS adapter API. Columns:
+126 rows (same structure). Tests the 6 PQClean-fork backends plus the liboqs production reference through the OQS adapter API. Columns:
 
 | Column | Description |
 |---|---|
-| `backend` | shake / turboshake / k12 / blake3 / xoodyak / haraka |
+| `backend` | shake / turboshake / k12 / blake3 / xoodyak / haraka / liboqs-ref |
 | `algorithm` | ML-KEM-512/768/1024 or ML-DSA-44/65/87 |
 | `type` | `KEM` or `SIG` |
 | `operation` | keygen / encaps / decaps / sign / verify |
@@ -681,9 +686,10 @@ Each backend replaces `symmetric-shake.c` in PQClean with a custom `symmetric-<t
 - `prf(out, outlen, key, nonce)` — PRF for noise sampling
 - `rkprf(ss, key, ct)` — KDF for final shared secret
 
-### The 5 custom `symmetric-<tag>.c` files
+### The 6 `symmetric-<tag>.c` files
 
 ```
+symmetric-shake.c       — SHAKE128/256 (upstream PQClean, unmodified — BASELINE)
 symmetric-turboshake.c  — TurboSHAKE128/256 (n_r=12, XKCP)
 symmetric-k12.c         — KangarooTwelve (tree hash, XKCP)
 symmetric-blake3.c      — BLAKE3 XOF (blake3_hasher_init_derive_key_raw)
@@ -693,7 +699,7 @@ symmetric-haraka.c      — Haraka-256/512 (AES round function)
 
 ### Adapter shims
 
-The 10 adapter files (`pqc_<tag>_{kem,dsa}.{c,h}`) wrap each variant's PQClean API into liboqs `OQS_KEM` / `OQS_SIG` structs:
+The 12 adapter files (`pqc_<tag>_{kem,dsa}.{c,h}`) wrap each variant's PQClean API into liboqs `OQS_KEM` / `OQS_SIG` structs:
 
 ```c
 OQS_KEM *OQS_KEM_ml_kem_512_turboshake_new(void);
@@ -703,19 +709,22 @@ OQS_SIG *OQS_SIG_ml_dsa_44_blake3_new(void);
 
 ### Benchmark harness
 
-`pqc_bench.c` is compiled six times:
+`pqc_bench.c` is compiled seven times:
 ```bash
+gcc -DUSE_SHAKE       ... -o bench_shake       # PQClean-fork SHAKE — the baseline
 gcc -DUSE_TURBOSHAKE  ... -o bench_turboshake
 gcc -DUSE_K12         ... -o bench_k12
-# etc. (no -DUSE_* -> bench_shake uses liboqs OQS_KEM_new)
+# etc. for blake3/xoodyak/haraka
+gcc                   ... -o bench_liboqs      # no -DUSE_*: liboqs built-ins
+                                               # ("SHAKE-liboqs" production reference)
 ```
 
 ### liboqs_bench — All backends via OQS API
 
-`liboqs_bench.c` uses a function pointer table to test all 6 backends:
-- `shake` — calls `OQS_KEM_new()` / `OQS_SIG_new()` (liboqs default)
-- `turboshake` — calls `OQS_KEM_ml_kem_512_turboshake_new()` etc.
-- `k12` / `blake3` / `xoodyak` / `haraka` — same pattern via adapter constructors
+`liboqs_bench.c` uses a function pointer table to test all 7 series:
+- `shake` — calls `OQS_KEM_ml_kem_512_shake_new()` etc. (PQClean-fork baseline)
+- `turboshake` / `k12` / `blake3` / `xoodyak` / `haraka` — same pattern via adapter constructors
+- `liboqs-ref` — calls `OQS_KEM_new()` / `OQS_SIG_new()` (liboqs default, production reference)
 
 Each backend x algorithm combination goes through the same `OQS_KEM_keypair()` / `OQS_KEM_encaps()` / `OQS_KEM_decaps()` API with correctness verification before timing.
 
@@ -733,7 +742,7 @@ make -f pqc-hash-agility/src/bench/Makefile
 ./full_bench --iters 500 --warmup 20 --csv full_benchmark_results.csv
 ```
 
-This runs all 36 variants (6 backends x 6 algorithms) in one pass,
+This runs all 42 combinations (6 PQClean-fork backends + liboqs-ref, x 6 algorithms) in one pass,
 tests keygen->encaps->decaps and keygen->sign->verify correctness (PASS/FAIL),
 and reports detailed timing stats (mean, median, min, max, stddev, ops/sec).
 
