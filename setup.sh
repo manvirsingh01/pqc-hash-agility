@@ -14,12 +14,17 @@
 #   bash bench.sh
 #
 # Backends built:
-#   shake      — liboqs built-in (FIPS-approved SHAKE/SHA3)
+#   shake      — PQClean fork (FIPS SHAKE/SHA3, symmetric-shake.c) — the
+#                hash-substitution BASELINE, compiled identically to the
+#                five substituted backends below
 #   turboshake — PQClean fork (TurboSHAKE128/256, n_r=12)
 #   k12        — PQClean fork (KangarooTwelve)
 #   blake3     — PQClean fork (BLAKE3 XOF, portable)
 #   xoodyak    — PQClean fork (Xoodyak/Xoodoo[12])
 #   haraka     — PQClean fork (Haraka-256/512; AES-NI on x86_64, NEON on aarch64)
+#   liboqs     — liboqs built-in ML-KEM/ML-DSA (bench_liboqs): separate
+#                "production reference" series, NOT part of the
+#                hash-substitution comparison
 #
 # Algorithms:
 #   ML-KEM-512 / 768 / 1024   (FIPS 203 key encapsulation)
@@ -109,7 +114,7 @@ echo "[5/15] Installing custom PQClean backend sources..."
 cp -r "$REPO/src/common/BLAKE3" PQClean/common/
 cp -r "$REPO/src/common/Haraka" PQClean/common/
 
-for tag in turboshake k12 blake3 xoodyak haraka; do
+for tag in shake turboshake k12 blake3 xoodyak haraka; do
   for v in 512 768 1024; do
     dst="PQClean/crypto_kem/ml-kem-$v/$tag"
     mkdir -p "$dst"
@@ -125,7 +130,7 @@ done
 # ── 6. Copy adapter sources + bench harness, fix hardcoded /root paths ────────
 echo "[6/15] Copying adapters and fixing include paths..."
 cp "$REPO"/src/pqc_bench.c .
-for tag in turboshake k12 blake3 xoodyak haraka; do
+for tag in shake turboshake k12 blake3 xoodyak haraka; do
   cp "$REPO/src/adapters/pqc_${tag}_kem.c" "$REPO/src/adapters/pqc_${tag}_kem.h" .
   cp "$REPO/src/adapters/pqc_${tag}_dsa.c" "$REPO/src/adapters/pqc_${tag}_dsa.h" .
   sed -i "s#/root/PQClean#$ROOT/PQClean#g" "pqc_${tag}_kem.c" "pqc_${tag}_dsa.c"
@@ -179,13 +184,14 @@ fi
 
 # ── 11. Per-backend compiler flags ────────────────────────────────────────────
 declare -A EXTRA
+EXTRA[shake]=""
 EXTRA[turboshake]="-I$XKCP_HDRS"
 EXTRA[k12]="-I$XKCP_HDRS"
 EXTRA[blake3]="-I$ROOT/PQClean/common/BLAKE3 $BLAKE3_FLAGS"
 EXTRA[xoodyak]="-I$XKCP_HDRS"
 EXTRA[haraka]="-I$ROOT/PQClean/common/Haraka"
 
-BACKENDS="turboshake k12 blake3 xoodyak"
+BACKENDS="shake turboshake k12 blake3 xoodyak"
 [ "$BUILD_HARAKA" = "1" ] && BACKENDS="$BACKENDS haraka"
 
 # ── 12. Build all forked ML-KEM / ML-DSA static libs (parallel) ──────────────
@@ -211,17 +217,20 @@ for tag in $BACKENDS; do
       -c "pqc_${tag}_dsa.c" -o "pqc_${tag}_dsa.o"
 done
 
-# ── 14. Compile bench_shake (FIPS SHAKE baseline via liboqs static) ───────────
+# ── 14. Compile bench_liboqs (liboqs production reference) ───────────────────
+# No -DUSE_* flag: liboqs's own ML-KEM/ML-DSA engineering, same FIPS SHAKE.
+# This is a SEPARATE reference series; the hash-substitution baseline is
+# bench_shake, built from the PQClean fork in step 15 like the other five.
 echo "[14/15] Compiling and linking benchmark binaries..."
 
-gcc $BASE_CFLAGS -I "$OQS_INC" -c pqc_bench.c -o pqc_bench_shake.o
+gcc $BASE_CFLAGS -I "$OQS_INC" -c pqc_bench.c -o pqc_bench_liboqs.o
 # Static link against liboqs.a so binary runs without LD_LIBRARY_PATH
-gcc $BASE_CFLAGS pqc_bench_shake.o \
-    "$OQS_STATIC" -lcrypto -lm -o bench_shake
+gcc $BASE_CFLAGS pqc_bench_liboqs.o \
+    "$OQS_STATIC" -lcrypto -lm -o bench_liboqs
 
 # ── 15. Compile + link per-backend bench binaries (static) ───────────────────
-declare -A KEMTAG=( [turboshake]=turboshake [k12]=k12 [blake3]=blake3 [xoodyak]=xoodyak [haraka]=haraka )
-declare -A SIGTAG=( [turboshake]=turbo      [k12]=k12 [blake3]=blake3 [xoodyak]=xoodyak [haraka]=haraka )
+declare -A KEMTAG=( [shake]=shake [turboshake]=turboshake [k12]=k12 [blake3]=blake3 [xoodyak]=xoodyak [haraka]=haraka )
+declare -A SIGTAG=( [shake]=shake [turboshake]=turbo      [k12]=k12 [blake3]=blake3 [xoodyak]=xoodyak [haraka]=haraka )
 
 for tag in $BACKENDS; do
   UTAG=$(echo "$tag" | tr '[:lower:]' '[:upper:]')
@@ -261,5 +270,6 @@ for b in bench_shake bench_turboshake bench_k12 bench_blake3 bench_xoodyak; do
   echo "  $b"
 done
 [ "$BUILD_HARAKA" = "1" ] && echo "  bench_haraka"
+echo "  bench_liboqs   (production reference — liboqs built-in ML-KEM/ML-DSA)"
 echo ""
 echo "Run:  bash $REPO/bench.sh"

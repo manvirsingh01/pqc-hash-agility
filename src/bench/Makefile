@@ -31,6 +31,7 @@ CFLAGS := -O3 -march=native -Wall \
            $(BLAKE3_FLAGS) $(HARAKA_FLAGS)
 
 ADAPTER_OBJS := \
+  pqc_shake_kem.o      pqc_shake_dsa.o      \
   pqc_turboshake_kem.o pqc_turboshake_dsa.o \
   pqc_k12_kem.o        pqc_k12_dsa.o        \
   pqc_blake3_kem.o     pqc_blake3_dsa.o     \
@@ -38,11 +39,12 @@ ADAPTER_OBJS := \
   pqc_haraka_kem.o     pqc_haraka_dsa.o
 
 KEM_LIBS := $(foreach v,512 768 1024,\
-  $(foreach t,turboshake k12 blake3 xoodyak haraka,\
+  $(foreach t,shake turboshake k12 blake3 xoodyak haraka,\
     $(ROOT)/PQClean/crypto_kem/ml-kem-$(v)/$(t)/libml-kem-$(v)_$(t).a))
 
 DSA_LIBS := \
   $(foreach v,44 65 87,\
+    $(ROOT)/PQClean/crypto_sign/ml-dsa-$(v)/shake/libml-dsa-$(v)_shake.a \
     $(ROOT)/PQClean/crypto_sign/ml-dsa-$(v)/turboshake/libml-dsa-$(v)_turbo.a \
     $(ROOT)/PQClean/crypto_sign/ml-dsa-$(v)/k12/libml-dsa-$(v)_k12.a \
     $(ROOT)/PQClean/crypto_sign/ml-dsa-$(v)/blake3/libml-dsa-$(v)_blake3.a \

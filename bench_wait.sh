@@ -11,10 +11,13 @@
 #   run-to-run carryover — the main cause of drifting medians and long
 #   tails when many benchmarks execute back-to-back.
 #
-# Covers ALL algorithms for the library baseline and every custom backend:
-#   bench_shake       — library ML-KEM-512/768/1024 + ML-DSA-44/65/87
+# Covers ALL algorithms for every backend:
+#   bench_shake       — PQClean-fork SHAKE baseline, ML-KEM-512/768/1024 +
+#                       ML-DSA-44/65/87 (hash-substitution baseline)
 #   bench_turboshake / bench_k12 / bench_blake3 / bench_xoodyak /
-#   bench_haraka      — same algorithms with custom hash backends
+#   bench_haraka      — same algorithms with substituted hash backends
+#   bench_liboqs      — liboqs built-in ML-KEM/ML-DSA (separate
+#                       "production reference" series)
 #
 # CPU controls: frequency lock, turbo disable, core pinning, SCHED_FIFO.
 # Output: ONE combined CSV (round, run_order, wait_s columns prepended)
@@ -74,6 +77,12 @@ for b in bench_shake bench_turboshake bench_k12 bench_blake3 bench_xoodyak; do
 done
 if [ "$NO_HARAKA" = "0" ] && [ -x "./bench_haraka" ]; then
   BACKENDS+=("bench_haraka")
+fi
+# liboqs production reference — separate series (hash_backend "SHAKE-liboqs"),
+# benchmarked with the same wait-time isolation but not part of the
+# hash-substitution baseline comparison.
+if [ -x "./bench_liboqs" ]; then
+  BACKENDS+=("bench_liboqs")
 fi
 
 if [ ${#BACKENDS[@]} -eq 0 ]; then

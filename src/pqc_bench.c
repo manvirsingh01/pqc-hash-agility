@@ -134,6 +134,19 @@
 #  include <oqs/sig.h>       /* OQS_SIG struct           */
 #endif
 
+#ifdef USE_SHAKE
+/* OQS_KEM constructors for the SHAKE (FIPS 202) baseline ML-KEM variants --
+ * forked PQClean "clean" implementations whose symmetric-shake.c is
+ * byte-identical to upstream PQClean, compiled with the same Makefile and
+ * flags as the five substituted backends. This makes bench_shake a true
+ * hash-substitution baseline; the liboqs build (no -DUSE_* flag) remains
+ * available as a separate "production reference" series (bench_liboqs). */
+#  include "pqc_shake_kem.h"
+/* OQS_SIG constructors for the SHAKE baseline ML-DSA variants -- see
+ * pqc_shake_dsa.h for details. */
+#  include "pqc_shake_dsa.h"
+#endif
+
 #ifdef USE_TURBOSHAKE
 /* OQS_KEM constructors for the TurboSHAKE (RFC 9861) ML-KEM variants --
  * forked PQClean "clean" implementations with SHAKE128/256 replaced by
@@ -376,7 +389,14 @@ static void reduce_measurement_noise(void) {
  * ALGORITHM VARIANT TAG
  * Printed in all reports so you know which hash backend is active.
  * ========================================================================= */
-#ifdef USE_TURBOSHAKE
+#ifdef USE_SHAKE
+#  define HASH_BACKEND_TAG    "SHAKE (FIPS 202, n_r=24, FIPS-COMPLIANT)"
+#  define HASH_ROUNDS         24
+#  define FIPS_COMPLIANT      1
+#  define KEM_VECTOR1_LABEL   "SHAKE128 (n_r=24)"
+#  define KEM_VECTOR2_LABEL   "SHAKE256 (n_r=24)"
+#  define KEM_VECTOR4_LABEL   "SHAKE256 (n_r=24)"
+#elif defined(USE_TURBOSHAKE)
 #  define HASH_BACKEND_TAG    "TurboSHAKE (RFC 9861, n_r=12, NON-FIPS)"
 #  define HASH_ROUNDS         12
 #  define FIPS_COMPLIANT      0
@@ -412,12 +432,15 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR2_LABEL   "Haraka-CTR (D=0x2F)"
 #  define KEM_VECTOR4_LABEL   "Haraka-CTR (D=0x3F)"
 #else
-#  define HASH_BACKEND_TAG    "SHAKE (FIPS 202, n_r=24, FIPS-COMPLIANT)"
+/* No -DUSE_* flag: liboqs's own ML-KEM/ML-DSA (separately engineered code,
+ * same FIPS 202 SHAKE). Kept as an independent "production reference"
+ * series -- NOT the hash-substitution baseline, which is USE_SHAKE. */
+#  define HASH_BACKEND_TAG    "SHAKE-liboqs (FIPS 202, n_r=24, production reference)"
 #  define HASH_ROUNDS         24
 #  define FIPS_COMPLIANT      1
-#  define KEM_VECTOR1_LABEL   "SHAKE128 (n_r=24)"
-#  define KEM_VECTOR2_LABEL   "SHAKE256 (n_r=24)"
-#  define KEM_VECTOR4_LABEL   "SHAKE256 (n_r=24)"
+#  define KEM_VECTOR1_LABEL   "SHAKE128 (n_r=24, liboqs)"
+#  define KEM_VECTOR2_LABEL   "SHAKE256 (n_r=24, liboqs)"
+#  define KEM_VECTOR4_LABEL   "SHAKE256 (n_r=24, liboqs)"
 #endif
 
 /* =========================================================================
@@ -2494,9 +2517,13 @@ int main(int argc, char *argv[]) {
         };
         int n_kems = 3;
 
-#if defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
+#if defined(USE_SHAKE) || defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
         OQS_KEM *(*alt_ctors[])(void) = {
-#  ifdef USE_TURBOSHAKE
+#  ifdef USE_SHAKE
+            OQS_KEM_ml_kem_512_shake_new,
+            OQS_KEM_ml_kem_768_shake_new,
+            OQS_KEM_ml_kem_1024_shake_new
+#  elif defined(USE_TURBOSHAKE)
             OQS_KEM_ml_kem_512_turboshake_new,
             OQS_KEM_ml_kem_768_turboshake_new,
             OQS_KEM_ml_kem_1024_turboshake_new
@@ -2523,7 +2550,7 @@ int main(int argc, char *argv[]) {
         for (int ki = 0; ki < n_kems; ki++) {
             kem_bench_result_t kr;
 
-#if defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
+#if defined(USE_SHAKE) || defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
             OQS_KEM *kem = alt_ctors[ki]();
             if (!kem) {
                 fprintf(stderr, "[ERROR] Failed to construct %s\n", kem_algs[ki]);
@@ -2614,9 +2641,13 @@ int main(int argc, char *argv[]) {
         };
         int n_sigs = 3;
 
-#if defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
+#if defined(USE_SHAKE) || defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
         OQS_SIG *(*alt_sig_ctors[])(void) = {
-#  ifdef USE_TURBOSHAKE
+#  ifdef USE_SHAKE
+            OQS_SIG_ml_dsa_44_shake_new,
+            OQS_SIG_ml_dsa_65_shake_new,
+            OQS_SIG_ml_dsa_87_shake_new
+#  elif defined(USE_TURBOSHAKE)
             OQS_SIG_ml_dsa_44_turboshake_new,
             OQS_SIG_ml_dsa_65_turboshake_new,
             OQS_SIG_ml_dsa_87_turboshake_new
@@ -2643,7 +2674,7 @@ int main(int argc, char *argv[]) {
         for (int si = 0; si < n_sigs; si++) {
             sig_bench_result_t sr;
 
-#if defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
+#if defined(USE_SHAKE) || defined(USE_TURBOSHAKE) || defined(USE_K12) || defined(USE_BLAKE3) || defined(USE_XOODYAK) || defined(USE_HARAKA)
             OQS_SIG *sig = alt_sig_ctors[si]();
             if (!sig) {
                 fprintf(stderr, "[ERROR] Failed to construct %s\n", sig_algs[si]);

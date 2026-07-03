@@ -118,8 +118,12 @@ fi
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
 # ── Detect available benchmarks ──
+# bench_shake..bench_haraka are the PQClean-fork hash-substitution backends
+# (bench_shake = SHAKE baseline). bench_liboqs is liboqs's own ML-KEM/ML-DSA,
+# recorded as a separate "production reference" series (hash_backend tag
+# "SHAKE-liboqs"), not part of the hash-substitution comparison.
 BENCHES=""
-for b in bench_shake bench_turboshake bench_k12 bench_blake3 bench_xoodyak bench_haraka; do
+for b in bench_shake bench_turboshake bench_k12 bench_blake3 bench_xoodyak bench_haraka bench_liboqs; do
   [ -x "./$b" ] && BENCHES="$BENCHES $b"
 done
 
