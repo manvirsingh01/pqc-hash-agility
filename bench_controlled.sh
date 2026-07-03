@@ -15,7 +15,14 @@
 #   --iters  N     Iterations per operation per round (default: 5000)
 #   --warmup N     Warmup iterations (default: 500)
 #   --core   N     CPU core to pin to (default: 0)
+#   --settle N     Seconds to idle before EACH backend run (default: 3)
 #   --no-lock      Skip CPU frequency locking (for VMs/containers)
+#
+# Noise / tail-latency controls applied automatically:
+#   - SCHED_FIFO real-time priority via chrt (falls back to nice -20)
+#   - Per-backend settle wait so thermal state does not carry over
+#   - The benchmark binary itself locks pages (mlockall) and requests
+#     SCHED_FIFO internally, and reports outlier-robust trimmed-mean stats
 # =============================================================================
 set -euo pipefail
 
@@ -29,6 +36,7 @@ ITERS=5000
 WARMUP=500
 CORE=0
 LOCK_CPU=1
+SETTLE=3
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -36,6 +44,7 @@ while [ $# -gt 0 ]; do
     --iters)   ITERS="$2";  shift 2 ;;
     --warmup)  WARMUP="$2"; shift 2 ;;
     --core)    CORE="$2";   shift 2 ;;
+    --settle)  SETTLE="$2"; shift 2 ;;
     --no-lock) LOCK_CPU=0;  shift ;;
     --help|-h)
       sed -n '2,/^# ====/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -50,6 +59,7 @@ echo " Rounds         : $ROUNDS"
 echo " Iterations     : $ITERS  (per operation per round)"
 echo " Warmup         : $WARMUP"
 echo " Pinned core    : $CORE"
+echo " Settle wait    : ${SETTLE}s before each backend run"
 echo " CPU lock       : $([ "$LOCK_CPU" = "1" ] && echo "YES" || echo "NO (--no-lock)")"
 echo " Output dir     : results/replications/"
 echo "========================================================="
@@ -89,6 +99,21 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# ── Real-time launcher (tail-latency control) ──
+# SCHED_FIFO stops other tasks preempting the benchmark mid-measurement,
+# which is the main source of high-percentile outliers. Fall back to
+# nice -20 when RT scheduling is not permitted.
+LAUNCHER="taskset -c $CORE"
+if chrt -f 99 true 2>/dev/null; then
+  LAUNCHER="chrt -f 99 taskset -c $CORE"
+  echo "[noise] Real-time priority: SCHED_FIFO 99 (via chrt)"
+elif nice -n -20 true 2>/dev/null; then
+  LAUNCHER="nice -n -20 taskset -c $CORE"
+  echo "[noise] Priority: nice -20 (chrt unavailable)"
+else
+  echo "[noise] Default priority (run as root for SCHED_FIFO)"
+fi
+
 # ── Generate system info ──
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
@@ -122,8 +147,12 @@ for ROUND in $(seq 1 "$ROUNDS"); do
     CSV_OUT="$RESULTS_DIR/round${ROUND}_${BENCH}.csv"
     echo "  [$BENCH] → $(basename "$CSV_OUT")"
 
+    # Settle wait: let the CPU drain thermal/frequency state left by the
+    # previous backend so it cannot inflate this backend's tail latency.
+    [ "$SETTLE" -gt 0 ] && sleep "$SETTLE"
+
     rm -f pqc_benchmark_results.csv
-    taskset -c "$CORE" "./$BENCH" \
+    $LAUNCHER "./$BENCH" \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append 2>&1 | tail -5

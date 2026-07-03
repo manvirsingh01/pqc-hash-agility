@@ -74,7 +74,12 @@ sudo bash bench_shuffled.sh       # 10 rounds, shuffled order, single CSV
 python3 compute_ci.py --shuffled results/shuffled_benchmark.csv
 # Produces: results/shuffled_benchmark.csv (one file, all rounds + run_order)
 
-# 10. (Optional) Run correctness-only tests (no timing)
+# 10. (Optional) Wait-time benchmark — CPU idles before every backend run
+sudo bash bench_wait.sh           # 5 rounds, 15s settle wait before each run
+python3 compute_ci.py --shuffled results/wait_benchmark.csv
+# Produces: results/wait_benchmark.csv + results/wait_system_info.txt
+
+# 11. (Optional) Run correctness-only tests (no timing)
 ./bench_shake --correctness-only --trials 1000
 ```
 
@@ -107,6 +112,7 @@ pqc-hash-agility/
 ├── pure_system_info.sh       # system info for the pure benchmark
 ├── bench_controlled.sh       # controlled runner: CPU pinning, replication, CI
 ├── bench_shuffled.sh         # shuffled-order runner: randomised backend order per round
+├── bench_wait.sh             # wait-time runner: idle wait before every backend run
 ├── compute_ci.py             # compute 95% CI and effect sizes from replications
 ├── system_info.sh            # generate system_info.txt (CPU/memory/ISA)
 ├── src/
@@ -149,6 +155,8 @@ pqc-hash-agility/
 │   ├── effect_sizes.csv          # (from compute_ci.py) backend comparisons
 │   ├── controlled_benchmark.csv   # (from bench_controlled.sh) all rounds, single file
 │   ├── shuffled_benchmark.csv     # (from bench_shuffled.sh) all rounds, single file
+│   ├── wait_benchmark.csv         # (from bench_wait.sh) all rounds, single file
+│   ├── wait_system_info.txt       # (from bench_wait.sh) system info for wait runs
 │   ├── replications/             # (from bench_controlled.sh) per-round CSVs also kept
 │   ├── pure/                     # (from pure_bench.sh) stock liboqs benchmark
 │   │   ├── pure_benchmark.csv
@@ -222,6 +230,18 @@ Use `bench_controlled.sh` for publication-quality results:
 6. Effect sizes (speedup claims) are only reported when confidence intervals do not overlap
 
 Use `bench_shuffled.sh` for the strongest noise reduction: it **randomises backend execution order** each round, eliminating ordering bias (cache warming, thermal throttle, OS scheduler drift). The `run_order` column in the output lets you verify that first-vs-last position doesn't affect results.
+
+Use `bench_wait.sh` for thermal isolation: the CPU idles for a configurable wait time before **every** backend run, so each backend starts from the same settled thermal/frequency state.
+
+### Noise and Tail-Latency Controls
+
+Applied automatically on top of the CPU controls above:
+
+- **`mlockall()`** — the benchmark binary locks all pages into RAM at startup, eliminating page-fault latency spikes inside the timed loops (needs root)
+- **`SCHED_FIFO` real-time scheduling** — both in-process (`sched_setscheduler`, priority 90) and via the `chrt -f 99` launcher in the driver scripts; other tasks cannot preempt a measurement mid-flight. Falls back to `nice -20` without root
+- **Per-backend settle wait** — `bench_controlled.sh` / `bench_shuffled.sh` idle `--settle` seconds (default 3) before each backend run so thermal state doesn't carry over
+- **Trimmed mean** — the `trimmed_mean_cycles` / `trimmed_mean_ns` column drops the lowest and highest 2.5% of samples, giving an outlier-robust average. The raw `max`/`p99` columns still expose the untrimmed tail
+- **Runtime `--iterations` / `--warmup`** — the per-backend binaries now honour these flags (previously they were compile-time constants and the flags were silently ignored)
 
 ### Memory Profiling
 
@@ -452,9 +472,10 @@ sudo bash bench_controlled.sh --rounds 20 --iters 10000 --core 2
 | `--iters N` | 5000 | Iterations per operation per round |
 | `--warmup N` | 500 | Warmup iterations |
 | `--core N` | 0 | CPU core to pin to (`taskset -c N`) |
+| `--settle N` | 3 | Idle seconds before EACH backend run (thermal settle) |
 | `--no-lock` | — | Skip CPU governor and turbo controls |
 
-**CPU controls applied:** frequency governor locked to `performance`, Intel turbo boost disabled, process pinned to a single core. 5-second cooldown between rounds.
+**CPU controls applied:** frequency governor locked to `performance`, Intel turbo boost disabled, process pinned to a single core, `chrt -f 99` real-time priority (falls back to `nice -20`), per-backend settle wait, 5-second cooldown between rounds. The binaries additionally apply `mlockall()` and in-process `SCHED_FIFO`.
 
 Output:
 - **`results/controlled_benchmark.csv`** — single combined file with `round` and `run_order` columns (all rounds in one file for easy analysis)
@@ -483,6 +504,7 @@ sudo bash bench_shuffled.sh --rounds 20 --iters 10000
 | `--iters N` | 5000 | Iterations per operation per round |
 | `--warmup N` | 500 | Warmup iterations |
 | `--core N` | 0 | CPU core to pin to |
+| `--settle N` | 3 | Idle seconds before EACH backend run (thermal settle) |
 | `--no-lock` | — | Skip CPU governor and turbo controls |
 | `--no-haraka` | — | Skip Haraka backend |
 | `--csv PATH` | `results/shuffled_benchmark.csv` | Output path |
@@ -504,6 +526,35 @@ python3 compute_ci.py --shuffled results/shuffled_benchmark.csv
 ```
 
 The `run_order` column lets you check whether running first vs last affects performance — if it does, you have an ordering-bias problem that only shuffling can detect.
+
+---
+
+### bench_wait.sh — Wait-Time (Cooldown-Isolated) Benchmark
+
+Third noise-reduction setup. Before **every** backend run the script idles for a configurable wait time so the CPU returns to a settled thermal baseline — each backend starts from the same cold state, removing run-to-run carryover (the main cause of drifting medians and long tails in back-to-back runs). Covers all algorithms for the library baseline (`bench_shake`) and every custom backend.
+
+```bash
+sudo bash bench_wait.sh                       # 5 rounds, 15s wait before each run
+sudo bash bench_wait.sh --rounds 10 --wait 30 --iters 10000
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `--rounds N` | 5 | Independent benchmark rounds |
+| `--iters N` | 5000 | Iterations per operation per round |
+| `--warmup N` | 500 | Warmup iterations |
+| `--wait N` | 15 | Idle seconds BEFORE each backend run |
+| `--core N` | 0 | CPU core to pin to |
+| `--no-lock` | — | Skip CPU governor and turbo controls |
+| `--no-haraka` | — | Skip Haraka backend |
+| `--csv PATH` | `results/wait_benchmark.csv` | Output path |
+
+Same CPU controls as the other two runners (governor lock, turbo off, core pinning, `chrt -f 99`). Output: **single CSV** with `round`, `run_order`, `wait_s`, `backend_binary` columns prepended, plus its own system-info file at `results/wait_system_info.txt`.
+
+Analyse with:
+```bash
+python3 compute_ci.py --shuffled results/wait_benchmark.csv
+```
 
 ---
 
@@ -563,6 +614,12 @@ All CSV files are written to the `results/` directory.
 | `wall_ns_median` | Median operation latency in nanoseconds |
 | `ops_per_sec` | Operations per second |
 | `nist_level` | NIST security category (1/3/5) |
+| `trimmed_mean_cycles`, `p90_cycles` | Outlier-robust mean (middle 95%) and 90th percentile |
+| `timing_overhead_cycles` | Harness cost subtracted from every sample |
+| `rss_before_kb`, `peak_rss_after_kb` | Raw resident-set readings around the memory probe |
+| `heap_before_bytes`, `heap_after_bytes`, `heap_delta_bytes` | Raw malloc-arena readings |
+| `rapl_before_uj`, `rapl_after_uj`, `rapl_loop_total_uj`, `rapl_loop_iters` | Raw RAPL energy counter readings around the whole timed loop |
+| `rapl_energy_uj`, `rapl_measured` | Derived per-op energy (µJ) and whether RAPL hardware was available |
 
 ### `results/library_default_benchmark.csv`
 
@@ -580,14 +637,18 @@ All CSV files are written to the `results/` directory.
 | `ops_per_sec` | Operations per second |
 | `pk_bytes`, `sk_bytes`, `ct_or_sig_bytes`, `ss_bytes` | Key/ciphertext sizes |
 | `nist_level` | NIST security category (1/3/5) |
+| `trimmed_mean_ns` | Outlier-robust mean (middle 95% of samples) |
+| `rss_before_kb`, `rss_after_kb` | Raw resident-set readings around the timed loop |
+| `rapl_before_uj`, `rapl_after_uj`, `rapl_total_uj` | Raw RAPL energy counter readings around the timed loop |
+| `rapl_energy_per_op_uj`, `rapl_measured` | Derived per-op energy (µJ) and RAPL availability flag |
 
 ### `results/custom_kem_k_benchmark.csv` / `results/library_default_kem_k_benchmark.csv`
 
-Variable number of rows depending on chosen k values and backends. The custom CSV contains user-selected k values; the library CSV contains the default k=2 baseline. The `type` column distinguishes `library` from `custom`. See [kem_k_bench.sh](#kem_k_benchsh--variable-k-value-ml-kem-benchmark) for column details.
+Variable number of rows depending on chosen k values and backends. The custom CSV contains user-selected k values; the library CSV contains the default k=2 baseline. The `type` column distinguishes `library` from `custom`. Each row also carries the raw memory (`rss_before_kb`, `rss_after_kb`) and raw energy (`rapl_before_uj`, `rapl_after_uj`, `rapl_total_uj`, `rapl_energy_per_op_uj`, `rapl_measured`) columns. See [kem_k_bench.sh](#kem_k_benchsh--variable-k-value-ml-kem-benchmark) for column details.
 
 ### `results/custom_*_hyper_benchmark.csv` / `results/library_default_*_hyper_benchmark.csv`
 
-Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. The `type` column distinguishes `library` from `custom`. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
+Variable number of rows depending on chosen parameter combinations and backends. Includes all hyperparameter values in each row for analysis. The `type` column distinguishes `library` from `custom`. Each row also carries the raw memory and raw energy (RAPL) columns as above. See [hyper_bench.sh](#hyper_benchsh--hyperparameter-benchmark-ml-kem--ml-dsa) for column details.
 
 ### `results/pure/pure_benchmark.csv`
 
@@ -600,6 +661,12 @@ N×108 rows (N rounds × 6 backends × 6 algorithms × 3 operations). Same data 
 ### `results/shuffled_benchmark.csv`
 
 Same structure as `controlled_benchmark.csv` but with **randomised** backend order each round. The `run_order` column differs between rounds — use it to detect ordering bias. See [bench_shuffled.sh](#bench_shuffledsh--shuffled-order-multi-round-benchmark) for details.
+
+### `results/wait_benchmark.csv`
+
+Same per-row data as `controlled_benchmark.csv`, produced by `bench_wait.sh` with a full idle wait before every backend run. Prepended columns: `round`, `run_order`, `wait_s` (the wait used), `backend_binary`. See [bench_wait.sh](#bench_waitsh--wait-time-cooldown-isolated-benchmark) for details.
+
+> **Note:** the combined CSVs from `bench_controlled.sh`, `bench_shuffled.sh` and `bench_wait.sh` all include the full raw energy/memory columns (`rapl_before_uj`, `rapl_after_uj`, `rapl_loop_total_uj`, `rss_before_kb`, `heap_before_bytes`, `heap_after_bytes`, …) since they reuse the per-backend binaries' CSV output. If you have CSVs from an older version of the suite, delete or archive them before re-running — appending new-format rows to old-format files would misalign columns.
 
 ---
 

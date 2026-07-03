@@ -27,6 +27,8 @@
 #include <inttypes.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include <oqs/oqs.h>
 
@@ -62,6 +64,9 @@ typedef struct {
     uint64_t min_ns;
     uint64_t max_ns;
     uint64_t stddev_ns;
+    uint64_t p95_ns;
+    uint64_t p99_ns;
+    uint64_t trimmed_mean_ns;   /* mean of middle 95% — outlier-robust */
     double   ops_per_sec;
     int      n;
 } Stats;
@@ -73,6 +78,8 @@ static Stats compute_stats(uint64_t *samples, int n) {
     s.min_ns    = samples[0];
     s.max_ns    = samples[n - 1];
     s.median_ns = (n & 1) ? samples[n / 2] : (samples[n/2 - 1] + samples[n/2]) / 2;
+    s.p95_ns    = samples[(int)((n - 1) * 0.95)];
+    s.p99_ns    = samples[(int)((n - 1) * 0.99)];
 
     double sum = 0.0, sum2 = 0.0;
     for (int i = 0; i < n; i++) { double v = (double)samples[i]; sum += v; sum2 += v * v; }
@@ -80,7 +87,68 @@ static Stats compute_stats(uint64_t *samples, int n) {
     double var   = sum2 / n - (sum / n) * (sum / n);
     s.stddev_ns  = (uint64_t)sqrt(var < 0 ? 0 : var);
     s.ops_per_sec = (s.mean_ns > 0) ? 1e9 / (double)s.mean_ns : 0.0;
+
+    /* Trimmed mean: drop lowest/highest 2.5% so a few scheduler or SMI
+     * outliers cannot skew the average (raw max/p99 still show the tail). */
+    {
+        int lo = (int)(n * 0.025), hi = n - lo;
+        if (hi <= lo) { lo = 0; hi = n; }
+        double tsum = 0.0;
+        for (int i = lo; i < hi; i++) tsum += (double)samples[i];
+        s.trimmed_mean_ns = (uint64_t)(tsum / (double)(hi - lo));
+    }
     return s;
+}
+
+/* ------------------------------------------------------------------ */
+/* Raw memory (RSS/heap via /proc) + energy (Intel RAPL) probes         */
+/* ------------------------------------------------------------------ */
+
+static long rss_kb(void) {
+    FILE *f = fopen("/proc/self/status", "r");
+    if (!f) return -1;
+    char line[128]; long v = -1;
+    while (fgets(line, sizeof(line), f))
+        if (sscanf(line, "VmRSS: %ld kB", &v) == 1) break;
+    fclose(f);
+    return v;
+}
+
+static double rapl_uj(void) {
+    static int fd = -2;
+    if (fd == -2)
+        fd = open("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj",
+                  O_RDONLY);
+    if (fd < 0) return -1.0;
+    char buf[32];
+    memset(buf, 0, sizeof(buf));
+    ssize_t r = pread(fd, buf, sizeof(buf) - 1, 0);
+    if (r <= 0) return -1.0;
+    return strtod(buf, NULL);
+}
+
+typedef struct {
+    long   rss_before_kb, rss_after_kb;
+    double rapl_before_uj, rapl_after_uj;
+    double rapl_total_uj, rapl_per_op_uj;
+    int    rapl_measured;
+} Probe;
+
+/* Call rss_kb()/rapl_uj() right before the timed loop, then this right
+ * after it, to capture raw before/after counters plus derived per-op uJ. */
+static Probe probe_finish(long rss_b, double rapl_b, int iters) {
+    Probe p;
+    memset(&p, 0, sizeof(p));
+    p.rss_before_kb  = rss_b;
+    p.rss_after_kb   = rss_kb();
+    p.rapl_before_uj = rapl_b;
+    p.rapl_after_uj  = rapl_uj();
+    if (rapl_b >= 0.0 && p.rapl_after_uj > rapl_b && iters > 0) {
+        p.rapl_total_uj  = p.rapl_after_uj - rapl_b;
+        p.rapl_per_op_uj = p.rapl_total_uj / (double)iters;
+        p.rapl_measured  = 1;
+    }
+    return p;
 }
 
 /* ------------------------------------------------------------------ */
@@ -95,13 +163,17 @@ static void csv_header(void) {
         "correctness,"
         "iterations,"
         "mean_ns,median_ns,min_ns,max_ns,stddev_ns,"
+        "p95_ns,p99_ns,trimmed_mean_ns,"
         "ops_per_sec,"
         "pk_bytes,sk_bytes,ct_or_sig_bytes,ss_bytes,"
-        "nist_level\n");
+        "nist_level,"
+        "rss_before_kb,rss_after_kb,"
+        "rapl_before_uj,rapl_after_uj,rapl_total_uj,"
+        "rapl_energy_per_op_uj,rapl_measured\n");
 }
 
 static void csv_row(const char *backend, const char *algo, const char *op,
-                    const char *correct, Stats st,
+                    const char *correct, Stats st, Probe pr,
                     size_t pk, size_t sk, size_t ct_sig, size_t ss,
                     int nist) {
     fprintf(g_csv,
@@ -109,16 +181,24 @@ static void csv_row(const char *backend, const char *algo, const char *op,
         "%s,"
         "%d,"
         "%"PRIu64",%"PRIu64",%"PRIu64",%"PRIu64",%"PRIu64","
+        "%"PRIu64",%"PRIu64",%"PRIu64","
         "%.2f,"
         "%zu,%zu,%zu,%zu,"
-        "%d\n",
+        "%d,"
+        "%ld,%ld,"
+        "%.2f,%.2f,%.2f,"
+        "%.4f,%d\n",
         backend, algo, op,
         correct,
         st.n,
         st.mean_ns, st.median_ns, st.min_ns, st.max_ns, st.stddev_ns,
+        st.p95_ns, st.p99_ns, st.trimmed_mean_ns,
         st.ops_per_sec,
         pk, sk, ct_sig, ss,
-        nist);
+        nist,
+        pr.rss_before_kb, pr.rss_after_kb,
+        pr.rapl_before_uj, pr.rapl_after_uj, pr.rapl_total_uj,
+        pr.rapl_per_op_uj, pr.rapl_measured);
     fflush(g_csv);
 }
 
@@ -169,34 +249,43 @@ static void bench_kem(OQS_KEM *kem, const char *backend, int iters,
         OQS_KEM_decaps(kem, ss2, ct, sk);
     }
 
+    long   rss_b;
+    double rapl_b;
+
     /* keygen */
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_KEM_keypair(kem, pk, sk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "keygen", correct,
-            compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, ct_b, ss_b, nist);
 
     /* encaps */
     OQS_KEM_keypair(kem, pk, sk);
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_KEM_encaps(kem, ct, ss1, pk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "encaps", correct,
-            compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, ct_b, ss_b, nist);
 
     /* decaps */
     OQS_KEM_encaps(kem, ct, ss1, pk);
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_KEM_decaps(kem, ss2, ct, sk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "decaps", correct,
-            compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, ct_b, ss_b, nist);
 
 cleanup:
     OQS_MEM_insecure_free(pk);
@@ -256,34 +345,43 @@ static void bench_sig(OQS_SIG *sig, const char *backend, int iters,
         OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk);
     }
 
+    long   rss_b;
+    double rapl_b;
+
     /* keygen */
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_SIG_keypair(sig, pk, sk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "keygen", correct,
-            compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, sg_b, 0, nist);
 
     /* sign */
     OQS_SIG_keypair(sig, pk, sk);
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "sign", correct,
-            compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, sg_b, 0, nist);
 
     /* verify */
     OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk);
+    rss_b = rss_kb(); rapl_b = rapl_uj();
     for (int i = 0; i < iters; i++) {
         uint64_t t0 = now_ns();
         OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk);
         ts[i] = now_ns() - t0;
     }
     csv_row(backend, algo_name, "verify", correct,
-            compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
+            compute_stats(ts, iters), probe_finish(rss_b, rapl_b, iters),
+            pk_b, sk_b, sg_b, 0, nist);
 
 cleanup:
     OQS_MEM_insecure_free(pk);
