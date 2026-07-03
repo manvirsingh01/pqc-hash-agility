@@ -163,7 +163,7 @@ echo ""
 read -rp "  Press ENTER to start... "
 
 # ── CSV headers ──
-KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits,standard_level,fips_applicable"
+KK_HEADER="backend,k_value,algorithm,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,eta1,eta2,du_bits,dv_bits,standard_level,fips_applicable,rss_before_kb,rss_after_kb,rapl_before_uj,rapl_after_uj,rapl_total_uj,rapl_energy_per_op_uj,rapl_measured"
 [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
 [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$KK_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
@@ -304,6 +304,8 @@ AEOF
 #include <inttypes.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "api.h"
 #include "params.h"
 
@@ -311,6 +313,45 @@ static uint64_t now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec*1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* raw memory (VmRSS) + energy (Intel RAPL) probes */
+static long rss_kb(void) {
+    FILE *f = fopen("/proc/self/status","r");
+    if (!f) return -1;
+    char line[128]; long v = -1;
+    while (fgets(line,sizeof(line),f))
+        if (sscanf(line,"VmRSS: %ld kB",&v)==1) break;
+    fclose(f);
+    return v;
+}
+static double rapl_uj(void) {
+    static int fd = -2;
+    if (fd == -2)
+        fd = open("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj", O_RDONLY);
+    if (fd < 0) return -1.0;
+    char buf[32]; memset(buf,0,sizeof(buf));
+    ssize_t r = pread(fd,buf,sizeof(buf)-1,0);
+    if (r <= 0) return -1.0;
+    return strtod(buf,NULL);
+}
+typedef struct {
+    long rss_before_kb, rss_after_kb;
+    double rapl_before_uj, rapl_after_uj, rapl_total_uj, rapl_per_op_uj;
+    int rapl_measured;
+} Probe;
+static Probe probe_finish(long rss_b, double rapl_b, int iters) {
+    Probe p; memset(&p,0,sizeof(p));
+    p.rss_before_kb = rss_b;
+    p.rss_after_kb  = rss_kb();
+    p.rapl_before_uj = rapl_b;
+    p.rapl_after_uj  = rapl_uj();
+    if (rapl_b >= 0.0 && p.rapl_after_uj > rapl_b && iters > 0) {
+        p.rapl_total_uj  = p.rapl_after_uj - rapl_b;
+        p.rapl_per_op_uj = p.rapl_total_uj / (double)iters;
+        p.rapl_measured  = 1;
+    }
+    return p;
 }
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x=*(const uint64_t*)a, y=*(const uint64_t*)b;
@@ -390,6 +431,7 @@ int main(int argc, char **argv) {
     FILE *fp=csv?fopen(csv,"a"):NULL;
     const char *ops[]={"keygen","encaps","decaps"};
     for(int op=0;op<3;op++){
+        long rss_b=rss_kb(); double rapl_b=rapl_uj();
         if(op==0){
             for(int i=0;i<iters;i++){uint64_t t=now_ns();${PREFIX}_crypto_kem_keypair(pk,sk);ts[i]=now_ns()-t;}
         }else if(op==1){
@@ -399,13 +441,15 @@ int main(int argc, char **argv) {
             ${PREFIX}_crypto_kem_enc(ct,ss1,pk);
             for(int i=0;i<iters;i++){uint64_t t=now_ns();${PREFIX}_crypto_kem_dec(ss2,ct,sk);ts[i]=now_ns()-t;}
         }
+        Probe pr=probe_finish(rss_b,rapl_b,iters);
         Stats st=compute(ts,iters);
         printf("    %-8s  median=%"PRIu64"ns  ops/s=%.1f\n",ops[op],st.median,st.ops);
         if(fp){
             fprintf(fp,"%s,%d,%s,%s,%s,%s,%d,"
                 "%"PRIu64",%"PRIu64",%"PRIu64",%"PRIu64","
                 "%"PRIu64",%"PRIu64",%"PRIu64","
-                "%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%s,%d\n",
+                "%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%s,%d,"
+                "%ld,%ld,%.2f,%.2f,%.2f,%.4f,%d\n",
                 backend,k_val,algo,bench_type,ops[op],correct,iters,
                 st.mean,st.median,st.mn,st.mx,st.sd,st.p95,st.p99,st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
@@ -413,7 +457,10 @@ int main(int argc, char **argv) {
                 ${PREFIX}_CRYPTO_CIPHERTEXTBYTES,
                 ${PREFIX}_CRYPTO_BYTES,
                 KYBER_ETA1,KYBER_ETA2,$DU,$DV,
-                std_level,fips_applicable);
+                std_level,fips_applicable,
+                pr.rss_before_kb,pr.rss_after_kb,
+                pr.rapl_before_uj,pr.rapl_after_uj,pr.rapl_total_uj,
+                pr.rapl_per_op_uj,pr.rapl_measured);
         }
     }
     if(fp) fclose(fp);
@@ -502,7 +549,11 @@ echo "    correctness, iterations,"
 echo "    mean_ns, median_ns, min_ns, max_ns,"
 echo "    stddev_ns, p95_ns, p99_ns, ops_per_sec,"
 echo "    pk_bytes, sk_bytes, ct_bytes, ss_bytes,"
-echo "    eta1, eta2, du_bits, dv_bits"
+echo "    eta1, eta2, du_bits, dv_bits,"
+echo "    standard_level, fips_applicable,"
+echo "    rss_before_kb, rss_after_kb (raw memory),"
+echo "    rapl_before_uj, rapl_after_uj, rapl_total_uj,"
+echo "    rapl_energy_per_op_uj, rapl_measured (raw energy)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 rm -rf "$KBUILD"

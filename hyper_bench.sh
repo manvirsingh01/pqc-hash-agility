@@ -226,7 +226,7 @@ if [ "$FAMILY" = "1" ]; then
   echo ""
   read -rp "  Press ENTER to start... "
 
-  KEM_HEADER="backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes"
+  KEM_HEADER="backend,algorithm,profile,k,eta1,eta2,du,dv,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,ct_bytes,ss_bytes,rss_before_kb,rss_after_kb,rapl_before_uj,rapl_after_uj,rapl_total_uj,rapl_energy_per_op_uj,rapl_measured"
   [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
   [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$KEM_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
@@ -328,6 +328,8 @@ AEOF
 #include <inttypes.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "api.h"
 #include "params.h"
 static uint64_t now_ns(void) {
@@ -359,6 +361,44 @@ static Stats compute(uint64_t *s, int n) {
     r.sd = (uint64_t)sqrt(var < 0 ? 0 : var);
     r.ops = r.mean > 0 ? 1e9 / (double)r.mean : 0;
     return r;
+}
+/* raw memory (VmRSS) + energy (Intel RAPL) probes */
+static long rss_kb(void) {
+    FILE *f = fopen("/proc/self/status","r");
+    if (!f) return -1;
+    char line[128]; long v = -1;
+    while (fgets(line,sizeof(line),f))
+        if (sscanf(line,"VmRSS: %ld kB",&v)==1) break;
+    fclose(f);
+    return v;
+}
+static double rapl_uj(void) {
+    static int fd = -2;
+    if (fd == -2)
+        fd = open("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj", O_RDONLY);
+    if (fd < 0) return -1.0;
+    char buf[32]; memset(buf,0,sizeof(buf));
+    ssize_t r = pread(fd,buf,sizeof(buf)-1,0);
+    if (r <= 0) return -1.0;
+    return strtod(buf,NULL);
+}
+typedef struct {
+    long rss_before_kb, rss_after_kb;
+    double rapl_before_uj, rapl_after_uj, rapl_total_uj, rapl_per_op_uj;
+    int rapl_measured;
+} Probe;
+static Probe probe_finish(long rss_b, double rapl_b, int iters) {
+    Probe p; memset(&p,0,sizeof(p));
+    p.rss_before_kb = rss_b;
+    p.rss_after_kb  = rss_kb();
+    p.rapl_before_uj = rapl_b;
+    p.rapl_after_uj  = rapl_uj();
+    if (rapl_b >= 0.0 && p.rapl_after_uj > rapl_b && iters > 0) {
+        p.rapl_total_uj  = p.rapl_after_uj - rapl_b;
+        p.rapl_per_op_uj = p.rapl_total_uj / (double)iters;
+        p.rapl_measured  = 1;
+    }
+    return p;
 }
 BENCHEOF
 
@@ -411,6 +451,7 @@ int main(int argc, char **argv) {
     FILE *fp = csv ? fopen(csv, "a") : NULL;
     const char *ops[] = {"keygen", "encaps", "decaps"};
     for (int op = 0; op < 3; op++) {
+        long rss_b = rss_kb(); double rapl_b = rapl_uj();
         if (op == 0) {
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_kem_keypair(pk, sk); ts[i] = now_ns() - t; }
         } else if (op == 1) {
@@ -420,20 +461,25 @@ int main(int argc, char **argv) {
             ${PREFIX}_crypto_kem_enc(ct, ss1, pk);
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_kem_dec(ss2, ct, sk); ts[i] = now_ns() - t; }
         }
+        Probe pr = probe_finish(rss_b, rapl_b, iters);
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
             fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,%s,%s,%s,%d,"
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
-                "%.2f,%d,%d,%d,%d\n",
+                "%.2f,%d,%d,%d,%d,"
+                "%ld,%ld,%.2f,%.2f,%.2f,%.4f,%d\n",
                 backend, algo, profile, k_val, $ETA1, $ETA2, $DU, $DV,
                 bench_type, ops[op], correct, iters,
                 st.mean, st.median, st.mn, st.mx, st.sd, st.p95, st.p99, st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
                 ${PREFIX}_CRYPTO_CIPHERTEXTBYTES,
-                ${PREFIX}_CRYPTO_BYTES);
+                ${PREFIX}_CRYPTO_BYTES,
+                pr.rss_before_kb, pr.rss_after_kb,
+                pr.rapl_before_uj, pr.rapl_after_uj, pr.rapl_total_uj,
+                pr.rapl_per_op_uj, pr.rapl_measured);
         }
     }
     if (fp) fclose(fp);
@@ -644,7 +690,7 @@ elif [ "$FAMILY" = "2" ]; then
   echo ""
   read -rp "  Press ENTER to start... "
 
-  DSA_HEADER="backend,algorithm,base,K,L,eta,tau,beta,gamma1_bits,gamma2_div,omega,ctildebytes,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,sig_bytes"
+  DSA_HEADER="backend,algorithm,base,K,L,eta,tau,beta,gamma1_bits,gamma2_div,omega,ctildebytes,type,operation,correctness,iterations,mean_ns,median_ns,min_ns,max_ns,stddev_ns,p95_ns,p99_ns,ops_per_sec,pk_bytes,sk_bytes,sig_bytes,rss_before_kb,rss_after_kb,rapl_before_uj,rapl_after_uj,rapl_total_uj,rapl_energy_per_op_uj,rapl_measured"
   [ -f "$RESULTS_DIR/$CSV_CUSTOM" ] || echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_CUSTOM"
   [ -f "$RESULTS_DIR/$CSV_LIBRARY" ] || echo "$DSA_HEADER" > "$RESULTS_DIR/$CSV_LIBRARY"
 
@@ -807,6 +853,8 @@ AEOF
 #include <inttypes.h>
 #include <math.h>
 #include <time.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include "api.h"
 #include "params.h"
 static uint64_t now_ns(void) {
@@ -838,6 +886,44 @@ static Stats compute(uint64_t *s, int n) {
     r.sd = (uint64_t)sqrt(var < 0 ? 0 : var);
     r.ops = r.mean > 0 ? 1e9 / (double)r.mean : 0;
     return r;
+}
+/* raw memory (VmRSS) + energy (Intel RAPL) probes */
+static long rss_kb(void) {
+    FILE *f = fopen("/proc/self/status","r");
+    if (!f) return -1;
+    char line[128]; long v = -1;
+    while (fgets(line,sizeof(line),f))
+        if (sscanf(line,"VmRSS: %ld kB",&v)==1) break;
+    fclose(f);
+    return v;
+}
+static double rapl_uj(void) {
+    static int fd = -2;
+    if (fd == -2)
+        fd = open("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj", O_RDONLY);
+    if (fd < 0) return -1.0;
+    char buf[32]; memset(buf,0,sizeof(buf));
+    ssize_t r = pread(fd,buf,sizeof(buf)-1,0);
+    if (r <= 0) return -1.0;
+    return strtod(buf,NULL);
+}
+typedef struct {
+    long rss_before_kb, rss_after_kb;
+    double rapl_before_uj, rapl_after_uj, rapl_total_uj, rapl_per_op_uj;
+    int rapl_measured;
+} Probe;
+static Probe probe_finish(long rss_b, double rapl_b, int iters) {
+    Probe p; memset(&p,0,sizeof(p));
+    p.rss_before_kb = rss_b;
+    p.rss_after_kb  = rss_kb();
+    p.rapl_before_uj = rapl_b;
+    p.rapl_after_uj  = rapl_uj();
+    if (rapl_b >= 0.0 && p.rapl_after_uj > rapl_b && iters > 0) {
+        p.rapl_total_uj  = p.rapl_after_uj - rapl_b;
+        p.rapl_per_op_uj = p.rapl_total_uj / (double)iters;
+        p.rapl_measured  = 1;
+    }
+    return p;
 }
 BENCHEOF
 
@@ -890,6 +976,7 @@ int main(int argc, char **argv) {
     FILE *fp = csv ? fopen(csv, "a") : NULL;
     const char *ops[] = {"keygen", "sign", "verify"};
     for (int op = 0; op < 3; op++) {
+        long rss_b = rss_kb(); double rapl_b = rapl_uj();
         if (op == 0) {
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_sign_keypair(pk, sk); ts[i] = now_ns() - t; }
         } else if (op == 1) {
@@ -899,20 +986,25 @@ int main(int argc, char **argv) {
             ${PREFIX}_crypto_sign_signature(sig, &siglen, msg, msglen, sk);
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_sign_verify(sig, siglen, msg, msglen, pk); ts[i] = now_ns() - t; }
         }
+        Probe pr = probe_finish(rss_b, rapl_b, iters);
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
             fprintf(fp, "%s,%s,%s,%d,%d,%d,%d,%d,%d,%d,%d,%d,%s,%s,%s,%d,"
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
                 "%" PRIu64 ",%" PRIu64 ",%" PRIu64 ","
-                "%.2f,%d,%d,%d\n",
+                "%.2f,%d,%d,%d,"
+                "%ld,%ld,%.2f,%.2f,%.2f,%.4f,%d\n",
                 backend, algo, base, K, L, $DSA_ETA, $TAU_D, $BETA_D,
                 $DSA_GAMMA1_BITS, $DSA_GAMMA2_DIV, $OMEGA_D, $DSA_CTILDE,
                 bench_type, ops[op], correct, iters,
                 st.mean, st.median, st.mn, st.mx, st.sd, st.p95, st.p99, st.ops,
                 ${PREFIX}_CRYPTO_PUBLICKEYBYTES,
                 ${PREFIX}_CRYPTO_SECRETKEYBYTES,
-                ${PREFIX}_CRYPTO_BYTES);
+                ${PREFIX}_CRYPTO_BYTES,
+                pr.rss_before_kb, pr.rss_after_kb,
+                pr.rapl_before_uj, pr.rapl_after_uj, pr.rapl_total_uj,
+                pr.rapl_per_op_uj, pr.rapl_measured);
         }
     }
     if (fp) fclose(fp);

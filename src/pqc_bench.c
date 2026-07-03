@@ -115,6 +115,8 @@
  * automatically and the heap-delta columns simply report 0.
  * ========================================================================= */
 #include <sys/resource.h>
+#include <sys/mman.h>      /* mlockall: pin pages, avoid page-fault spikes */
+#include <sched.h>         /* sched_setscheduler: SCHED_FIFO tail control  */
 #if defined(__GLIBC__)
 #  include <malloc.h>
 #  define PQC_HAVE_MALLINFO 1
@@ -199,6 +201,18 @@
 #ifndef BENCH_WARMUP
 #  define BENCH_WARMUP            200
 #endif
+
+/* Runtime overrides: --iterations N and --warmup N.  The compile-time
+ * macros above only provide the defaults; the driver scripts
+ * (bench_controlled.sh, bench_shuffled.sh, bench_wait.sh) pass these
+ * flags per run.  All later code references the macros, which now expand
+ * to these globals. */
+static int g_bench_iterations = BENCH_ITERATIONS;
+static int g_bench_warmup     = BENCH_WARMUP;
+#undef  BENCH_ITERATIONS
+#undef  BENCH_WARMUP
+#define BENCH_ITERATIONS  g_bench_iterations
+#define BENCH_WARMUP      g_bench_warmup
 
 /* Dudect constant-time test: number of measurement pairs.
  * Must be large (>= 1,000,000) for statistical significance.
@@ -306,6 +320,10 @@
 
 static int rapl_available = 0;
 
+/* Median rdtsc/cntvct harness cost subtracted from every sample; exported
+ * to the CSV so readers can see exactly what was removed. */
+static uint64_t g_timing_overhead_cycles = 0;
+
 static double rapl_read_uj(void) {
     static int fd = -2;
     if (fd == -2) {
@@ -323,6 +341,35 @@ static double rapl_read_uj(void) {
 static void rapl_init(void) {
     double v = rapl_read_uj();
     rapl_available = (v > 0.0) ? 1 : 0;
+}
+
+/* =========================================================================
+ * NOISE / TAIL-LATENCY REDUCTION (best effort, no failure is fatal)
+ *
+ * Two dominant sources of tail latency in user-space benchmarks:
+ *   1. Page faults inside the timed loop (first touch of a page, or the
+ *      kernel reclaiming pages under memory pressure)  -> mlockall()
+ *   2. Preemption by other runnable tasks / kernel threads mid-measurement
+ *      -> SCHED_FIFO real-time class (root), falling back to nice -20
+ * Both are applied once at startup.  Each is best-effort: without root the
+ * calls fail silently and the benchmark still runs, just with more noise.
+ * ========================================================================= */
+static void reduce_measurement_noise(void) {
+    if (mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+        printf("  Noise control    : mlockall OK (pages locked, no page-fault spikes)\n");
+    else
+        printf("  Noise control    : mlockall unavailable (run as root to enable)\n");
+
+    struct sched_param sp;
+    memset(&sp, 0, sizeof(sp));
+    sp.sched_priority = 90;
+    if (sched_setscheduler(0, SCHED_FIFO, &sp) == 0) {
+        printf("  Scheduler        : SCHED_FIFO prio 90 (preemption suppressed)\n");
+    } else if (setpriority(PRIO_PROCESS, 0, -20) == 0) {
+        printf("  Scheduler        : nice -20 (SCHED_FIFO needs root)\n");
+    } else {
+        printf("  Scheduler        : default (run as root for FIFO / nice -20)\n");
+    }
 }
 
 /* =========================================================================
@@ -539,6 +586,8 @@ typedef struct {
     double    iqr;         /* Q3 - Q1                               */
     double    p99;         /* 99th percentile (tail latency)        */
     double    p95;         /* 95th percentile                       */
+    double    p90;         /* 90th percentile                       */
+    double    trimmed_mean;/* mean of middle 95% (2.5% cut per side)*/
     uint64_t  min_cycles;  /* minimum observed cycles               */
     uint64_t  max_cycles;  /* maximum observed cycles               */
     double    geo_mean;    /* geometric mean of cycles              */
@@ -590,9 +639,22 @@ static void compute_stats(bench_stats_t *s,
     s->q1     = PERCENTILE(sorted, n, 0.25);
     s->median = PERCENTILE(sorted, n, 0.50);
     s->q3     = PERCENTILE(sorted, n, 0.75);
+    s->p90    = PERCENTILE(sorted, n, 0.90);
     s->p95    = PERCENTILE(sorted, n, 0.95);
     s->p99    = PERCENTILE(sorted, n, 0.99);
     s->iqr    = s->q3 - s->q1;
+
+    /* Trimmed mean: drop the lowest and highest 2.5% of samples so a few
+     * scheduler / SMI / page-fault outliers cannot skew the average.
+     * The raw min/max/p99 columns still expose the untrimmed tail. */
+    {
+        uint64_t lo = (uint64_t)((double)n * 0.025);
+        uint64_t hi = n - lo;
+        if (hi <= lo) { lo = 0; hi = n; }
+        double tsum = 0.0;
+        for (uint64_t i = lo; i < hi; i++) tsum += (double)sorted[i];
+        s->trimmed_mean = tsum / (double)(hi - lo);
+    }
 
     /* Arithmetic mean and geometric mean. */
     double sum_log = 0.0;
@@ -934,6 +996,10 @@ typedef struct {
     long  peak_rss_after_kb;   /* absolute peak RSS after the op (KB)     */
     long  heap_delta_bytes;    /* malloc-arena delta for one call (bytes) */
     int   heap_available;      /* 1 if mallinfo-based tracking is active  */
+    /* Raw snapshots (unprocessed readings the deltas are derived from). */
+    long  rss_before_kb;       /* VmRSS before the op (KB)                */
+    long  heap_before_bytes;   /* malloc arena in-use before op (bytes)   */
+    long  heap_after_bytes;    /* malloc arena in-use after op (bytes)    */
 } mem_stats_t;
 
 /* Returns the process's current RSS in kilobytes via /proc/self/status.
@@ -1003,6 +1069,9 @@ static void mem_profile_op(mem_probe_fn op, void *ctx, mem_stats_t *out) {
     out->peak_rss_after_kb  = rss_after;
     out->peak_rss_delta_kb  = (rss_before >= 0 && rss_after >= 0)
                                   ? (rss_after - rss_before) : -1;
+    out->rss_before_kb      = rss_before;
+    out->heap_before_bytes  = heap_before;
+    out->heap_after_bytes   = heap_after;
 
     if (heap_before >= 0 && heap_after >= 0) {
         out->heap_available   = 1;
@@ -1043,6 +1112,11 @@ typedef struct {
     double  rapl_energy_uj;         /* actual RAPL measurement (0 if unavail) */
     int     calibrated;             /* 1 if ENERGY_PER_CYCLE_NJ user-supplied */
     int     rapl_measured;          /* 1 if rapl_energy_uj is a real reading  */
+    /* Raw RAPL counter readings (unprocessed, whole timed loop). */
+    double  rapl_before_uj;         /* package energy counter before the loop */
+    double  rapl_after_uj;          /* package energy counter after the loop  */
+    double  rapl_loop_total_uj;     /* raw delta over the entire timed loop   */
+    uint64_t rapl_loop_iters;       /* ops executed between the two readings  */
 } energy_stats_t;
 
 static void compute_energy_stats(energy_stats_t *e,
@@ -1086,6 +1160,9 @@ static void print_stats(const char *label,
     printf("  %-28s : %12.0f  cycles\n",    "Q1 (25th percentile)",    s->q1);
     printf("  %-28s : %12.0f  cycles\n",    "Q3 (75th percentile)",    s->q3);
     printf("  %-28s : %12.0f  cycles\n",    "IQR (Q3 - Q1)",           s->iqr);
+    printf("  %-28s : %12.2f  cycles  (outlier-robust)\n",
+                                             "Trimmed mean (95%)",      s->trimmed_mean);
+    printf("  %-28s : %12.0f  cycles\n",    "90th percentile",         s->p90);
     printf("  %-28s : %12.0f  cycles\n",    "95th percentile",         s->p95);
     printf("  %-28s : %12.0f  cycles  *** TAIL LATENCY ***\n",
                                              "99th percentile",         s->p99);
@@ -1331,6 +1408,7 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
         }
         qsort(oh_samples, 256, sizeof(uint64_t), uint64_cmp);
         timing_overhead = oh_samples[128];
+        g_timing_overhead_cycles = timing_overhead;
     }
 
     /* ================================================================
@@ -1369,8 +1447,12 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     compute_energy_stats(&result.energy_keygen, &result.keygen,
                          kem->length_public_key + kem->length_secret_key);
     if (rapl_available && rapl_kg_after > rapl_kg_before) {
+        result.energy_keygen.rapl_before_uj     = rapl_kg_before;
+        result.energy_keygen.rapl_after_uj      = rapl_kg_after;
+        result.energy_keygen.rapl_loop_total_uj = rapl_kg_after - rapl_kg_before;
+        result.energy_keygen.rapl_loop_iters    = total_iters;
         result.energy_keygen.rapl_energy_uj =
-            (rapl_kg_after - rapl_kg_before) / (double)BENCH_ITERATIONS;
+            (rapl_kg_after - rapl_kg_before) / (double)total_iters;
         result.energy_keygen.rapl_measured = 1;
     }
 
@@ -1409,8 +1491,12 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     compute_energy_stats(&result.energy_encaps, &result.encaps,
                          kem->length_ciphertext + kem->length_shared_secret);
     if (rapl_available && rapl_enc_after > rapl_enc_before) {
+        result.energy_encaps.rapl_before_uj     = rapl_enc_before;
+        result.energy_encaps.rapl_after_uj      = rapl_enc_after;
+        result.energy_encaps.rapl_loop_total_uj = rapl_enc_after - rapl_enc_before;
+        result.energy_encaps.rapl_loop_iters    = total_iters;
         result.energy_encaps.rapl_energy_uj =
-            (rapl_enc_after - rapl_enc_before) / (double)BENCH_ITERATIONS;
+            (rapl_enc_after - rapl_enc_before) / (double)total_iters;
         result.energy_encaps.rapl_measured = 1;
     }
 
@@ -1449,8 +1535,12 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
     compute_energy_stats(&result.energy_decaps, &result.decaps,
                          kem->length_ciphertext + kem->length_shared_secret);
     if (rapl_available && rapl_dec_after > rapl_dec_before) {
+        result.energy_decaps.rapl_before_uj     = rapl_dec_before;
+        result.energy_decaps.rapl_after_uj      = rapl_dec_after;
+        result.energy_decaps.rapl_loop_total_uj = rapl_dec_after - rapl_dec_before;
+        result.energy_decaps.rapl_loop_iters    = total_iters;
         result.energy_decaps.rapl_energy_uj =
-            (rapl_dec_after - rapl_dec_before) / (double)BENCH_ITERATIONS;
+            (rapl_dec_after - rapl_dec_before) / (double)total_iters;
         result.energy_decaps.rapl_measured = 1;
     }
 
@@ -1644,6 +1734,7 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
         }
         qsort(oh_samples, 256, sizeof(uint64_t), uint64_cmp);
         timing_overhead = oh_samples[128];
+        g_timing_overhead_cycles = timing_overhead;
     }
 
     /* ================================================================
@@ -1678,8 +1769,12 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     compute_energy_stats(&result.energy_keygen, &result.keygen,
                          sig->length_public_key + sig->length_secret_key);
     if (rapl_available && rapl_sig_kg_after > rapl_sig_kg_before) {
+        result.energy_keygen.rapl_before_uj     = rapl_sig_kg_before;
+        result.energy_keygen.rapl_after_uj      = rapl_sig_kg_after;
+        result.energy_keygen.rapl_loop_total_uj = rapl_sig_kg_after - rapl_sig_kg_before;
+        result.energy_keygen.rapl_loop_iters    = total_iters;
         result.energy_keygen.rapl_energy_uj =
-            (rapl_sig_kg_after - rapl_sig_kg_before) / (double)BENCH_ITERATIONS;
+            (rapl_sig_kg_after - rapl_sig_kg_before) / (double)total_iters;
         result.energy_keygen.rapl_measured = 1;
     }
 
@@ -1725,8 +1820,12 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     }
     compute_energy_stats(&result.energy_sign, &result.sign_op, sig->length_signature);
     if (rapl_available && rapl_sign_after > rapl_sign_before) {
+        result.energy_sign.rapl_before_uj     = rapl_sign_before;
+        result.energy_sign.rapl_after_uj      = rapl_sign_after;
+        result.energy_sign.rapl_loop_total_uj = rapl_sign_after - rapl_sign_before;
+        result.energy_sign.rapl_loop_iters    = total_iters;
         result.energy_sign.rapl_energy_uj =
-            (rapl_sign_after - rapl_sign_before) / (double)BENCH_ITERATIONS;
+            (rapl_sign_after - rapl_sign_before) / (double)total_iters;
         result.energy_sign.rapl_measured = 1;
     }
 
@@ -1767,8 +1866,12 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
     }
     compute_energy_stats(&result.energy_verify, &result.verify, sig->length_signature);
     if (rapl_available && rapl_ver_after > rapl_ver_before) {
+        result.energy_verify.rapl_before_uj     = rapl_ver_before;
+        result.energy_verify.rapl_after_uj      = rapl_ver_after;
+        result.energy_verify.rapl_loop_total_uj = rapl_ver_after - rapl_ver_before;
+        result.energy_verify.rapl_loop_iters    = total_iters;
         result.energy_verify.rapl_energy_uj =
-            (rapl_ver_after - rapl_ver_before) / (double)BENCH_ITERATIONS;
+            (rapl_ver_after - rapl_ver_before) / (double)total_iters;
         result.energy_verify.rapl_measured = 1;
     }
 
@@ -2019,7 +2122,10 @@ static void csv_open(int append) {
             "energy_proxy_units,energy_proxy_per_byte,"
             "est_energy_uj,est_energy_uj_per_byte,energy_calibrated,"
             "edp_cycle_ns,"
-            "rapl_energy_uj,rapl_measured\n");
+            "rapl_energy_uj,rapl_measured,"
+            "trimmed_mean_cycles,p90_cycles,timing_overhead_cycles,"
+            "rss_before_kb,heap_before_bytes,heap_after_bytes,"
+            "rapl_before_uj,rapl_after_uj,rapl_loop_total_uj,rapl_loop_iters\n");
 }
 
 static void csv_write_stats(const char            *algo,
@@ -2052,7 +2158,10 @@ static void csv_write_stats(const char            *algo,
             "%.0f,%.4f,"
             "%.4f,%.6f,%d,"
             "%.2f,"
-            "%.4f,%d\n",
+            "%.4f,%d,"
+            "%.2f,%.0f,%"PRIu64","
+            "%ld,%ld,%ld,"
+            "%.2f,%.2f,%.2f,%"PRIu64"\n",
             algo, op, HASH_BACKEND_TAG, HASH_ROUNDS, FIPS_COMPLIANT,
             correctness ? "PASS" : "FAIL",
             get_cycle_counter_type(),
@@ -2068,7 +2177,11 @@ static void csv_write_stats(const char            *algo,
             e->epu, e->epu_per_byte,
             e->est_energy_uj, e->est_energy_uj_per_byte, e->calibrated,
             e->edp_cycle_ns,
-            e->rapl_energy_uj, e->rapl_measured);
+            e->rapl_energy_uj, e->rapl_measured,
+            s->trimmed_mean, s->p90, g_timing_overhead_cycles,
+            m->rss_before_kb, m->heap_before_bytes, m->heap_after_bytes,
+            e->rapl_before_uj, e->rapl_after_uj, e->rapl_loop_total_uj,
+            e->rapl_loop_iters);
 }
 
 static void csv_close(void) {
@@ -2164,9 +2277,22 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--correctness-only") == 0) correctness_only = 1;
         if (strcmp(argv[i], "--trials") == 0 && i + 1 < argc)
             correctness_trials = atoi(argv[++i]);
+        if (strcmp(argv[i], "--iterations") == 0 && i + 1 < argc) {
+            int v = atoi(argv[++i]);
+            if (v > 0) g_bench_iterations = v;
+        }
+        if (strcmp(argv[i], "--warmup") == 0 && i + 1 < argc) {
+            int v = atoi(argv[++i]);
+            if (v >= 0) g_bench_warmup = v;
+        }
+        if (strcmp(argv[i], "--quick") == 0) {
+            g_bench_iterations = 50;
+            g_bench_warmup     = 10;
+        }
         if (strcmp(argv[i], "--help")     == 0) {
             printf("Usage: %s [--dudect] [--no-stack] [--kem-only] [--dsa-only] "
-                   "[--csv-append] [--correctness-only] [--trials N]\n",
+                   "[--csv-append] [--correctness-only] [--trials N] "
+                   "[--iterations N] [--warmup N] [--quick]\n",
                    argv[0]);
             return 0;
         }
@@ -2177,6 +2303,9 @@ int main(int argc, char *argv[]) {
 
     /* Initialize RAPL energy measurement. */
     rapl_init();
+
+    /* Apply best-effort noise / tail-latency controls (mlockall + RT sched). */
+    reduce_measurement_noise();
 
     /* ----------------------------------------------------------------
      * Print benchmark header
