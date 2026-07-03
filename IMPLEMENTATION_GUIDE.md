@@ -6,6 +6,15 @@ algorithm is rebuilt 6 times, once per internal hash/XOF backend, and all
 6 variants are benchmarked through a single harness (`pqc_bench.c`) via
 `liboqs`'s `OQS_KEM` / `OQS_SIG` object interfaces.
 
+> **See also:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — the high-level companion
+> with system flowcharts, the file-connection graph, and detailed algorithm
+> descriptions. It also documents the current **7-series design**: the SHAKE
+> baseline is now a PQClean fork (`bench_shake`, upstream `symmetric-shake.c`
+> compiled identically to the other five), and the liboqs built-ins run as a
+> separate production-reference series (`bench_liboqs`, tag `SHAKE-liboqs`).
+> Where this guide says "6 backends", the system today builds 6 PQClean forks
+> **plus** that liboqs reference binary.
+
 It covers:
 
 1. [Overview & architecture](#1-overview--architecture)

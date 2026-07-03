@@ -2,6 +2,8 @@
 
 Benchmarks **ML-KEM** (FIPS 203) and **ML-DSA** (FIPS 204) across six hash backends, showing the performance cost or gain of replacing the default SHAKE/SHA-3 XOF with alternative hash functions.
 
+> 📐 **New here?** Read [`ARCHITECTURE.md`](ARCHITECTURE.md) — the complete implementation guide with system flowcharts, the file-connection graph, and detailed descriptions of every algorithm (ML-KEM, ML-DSA, and all 7 hash backends). [`IMPLEMENTATION_GUIDE.md`](IMPLEMENTATION_GUIDE.md) is the source-level migration reference.
+
 | Backend | Hash primitive | Keccak rounds | SIMD tier | FIPS |
 |---|---|---|---|---|
 | `shake` | SHAKE128/256 — PQClean `symmetric-shake.c` (**baseline**) | 24 | None (scalar) | Yes |
