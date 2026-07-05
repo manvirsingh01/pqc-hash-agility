@@ -9,6 +9,8 @@
 # Research:        k=1, k=5..8 (non-standard module ranks)
 #
 # Recompiles ML-KEM with that k value and benchmarks keygen/encaps/decaps.
+# A 60 s thermal cooldown (override with --cooldown N) runs between every
+# k value so heat from one k's runs doesn't throttle the next k.
 # Generates BOTH benchmark types:
 #   custom  — user-selected k values
 #   library — standard default (k=2, ML-KEM-512 baseline)
@@ -26,11 +28,13 @@ mkdir -p "$RESULTS_DIR"
 ITERS=200
 WARMUP=20
 DEF_K=2
+COOLDOWN=60   # seconds of thermal cooldown between k values
 
 for i in "$@"; do
   case "$i" in
-    --iters)   shift; ITERS="$1"; shift ;;
-    --warmup)  shift; WARMUP="$1"; shift ;;
+    --iters)    shift; ITERS="$1"; shift ;;
+    --warmup)   shift; WARMUP="$1"; shift ;;
+    --cooldown) shift; COOLDOWN="$1"; shift ;;
     *) ;;
   esac
 done
@@ -62,6 +66,21 @@ done
 
 # ── Generate system info ──
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
+
+# ── Thermal cooldown with visible countdown ──
+cooldown() {
+  local secs=$1 label=$2
+  [ "$secs" -le 0 ] && return
+  echo ""
+  echo "  [cooldown] ${secs}s pause $label (CPU thermal settle)..."
+  local remaining=$secs
+  while [ "$remaining" -gt 0 ]; do
+    printf "\r  [cooldown] %3ds remaining " "$remaining"
+    sleep 1
+    remaining=$((remaining - 1))
+  done
+  printf "\r  [cooldown] done — resuming    \n"
+}
 
 # ── k-value parameter lookup ──
 get_eta1()    { [ "$1" -le 2 ] && echo 3 || echo 2; }
@@ -156,6 +175,7 @@ echo "  Per k value  : ${#BACKENDS[@]} library + ${#BACKENDS[@]} custom"
 echo "  Total runs   : $TOTAL"
 echo "  Iterations   : $ITERS"
 echo "  Warmup       : $WARMUP"
+echo "  Cooldown     : ${COOLDOWN}s between k values"
 echo "  Custom CSV   : $CSV_CUSTOM"
 echo "  Library CSV  : $CSV_LIBRARY"
 echo "  ─────────────────────────────────────────────"
@@ -489,9 +509,17 @@ MAINEOF
 }
 
 COMBO=0
+K_DONE=0
 
 # ── Benchmark each k value: library + custom for every k ──
 for K in "${K_VALUES[@]}"; do
+  # 60s (default) thermal cooldown between k values so one k's heat
+  # doesn't throttle the next k's measurements. Skipped before the first k.
+  if [ "$K_DONE" -gt 0 ]; then
+    cooldown "$COOLDOWN" "before k=$K"
+  fi
+  K_DONE=$((K_DONE + 1))
+
   ETA1=$(get_eta1 "$K")
   ETA2=$(get_eta2 "$K")
   DU=$(get_du "$K")
