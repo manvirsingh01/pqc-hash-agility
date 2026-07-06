@@ -65,6 +65,33 @@ echo "OS             : $(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME' |
 echo "Compiler       : $(gcc --version 2>/dev/null | head -1 || echo 'N/A')"
 echo ""
 
+echo "── Compiler Flags (Benchmark Build) ─────────"
+echo ""
+echo "These are the exact gcc flags used to compile each backend"
+echo "during benchmarking (setup.sh / hyper_bench.sh / kem_k_bench.sh)."
+echo ""
+ARCH_CF="$(uname -m)"
+echo "Base CFLAGS    : -O3 -march=native -Wall   (all backends)"
+if [ "$ARCH_CF" = "x86_64" ]; then
+  echo "Haraka CFLAGS  : -maes -msse4.1   (+ base; AES-NI round fn)"
+else
+  echo "Haraka CFLAGS  : -march=native    (+ base; ARM Crypto Ext)"
+fi
+echo "BLAKE3 CFLAGS  : -DBLAKE3_USE_NEON=0 -DBLAKE3_NO_SSE2"
+echo "                 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2"
+echo "                 -DBLAKE3_NO_AVX512   (portable C, SIMD off)"
+echo "liboqs CFLAGS  : -O3 -march=native   (CMAKE_C_FLAGS)"
+echo "liboqs cmake   : OQS_DIST_BUILD=OFF, OQS_USE_OPENSSL=OFF,"
+if [ "$ARCH_CF" = "x86_64" ]; then
+  echo "                 OQS_USE_AVX_INSTRUCTIONS=OFF,"
+  echo "                 OQS_USE_AVX2_INSTRUCTIONS=OFF,"
+  echo "                 OQS_USE_AVX512_INSTRUCTIONS=OFF"
+else
+  echo "                 kyber_{512,768,1024}_aarch64=OFF"
+fi
+echo "Linking        : static (liboqs.a) + libcrypto (OpenSSL) + libm"
+echo ""
+
 echo "── Benchmark Threading ──────────────────────"
 echo "Execution mode : SINGLE-THREADED (sequential)"
 echo "Affinity       : Not pinned (OS scheduler)"

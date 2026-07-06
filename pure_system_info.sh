@@ -64,6 +64,25 @@ echo "OS             : $(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME' |
 echo "Compiler       : $(gcc --version 2>/dev/null | head -1 || echo 'N/A')"
 echo ""
 
+echo "── Compiler Flags (Benchmark Build) ─────────"
+echo ""
+echo "Exact gcc flags used to compile the pure benchmark (pure_bench.sh)"
+echo "and the underlying liboqs library (setup.sh)."
+echo ""
+ARCH_CF="$(uname -m)"
+echo "pure_bench     : gcc -O3 -I <liboqs/build/include>"
+echo "Link flags     : liboqs.a (static) -lcrypto -lm"
+echo "liboqs CFLAGS  : -O3 -march=native   (CMAKE_C_FLAGS)"
+echo "liboqs cmake   : OQS_DIST_BUILD=OFF, OQS_USE_OPENSSL=OFF,"
+if [ "$ARCH_CF" = "x86_64" ]; then
+  echo "                 OQS_USE_AVX_INSTRUCTIONS=OFF,"
+  echo "                 OQS_USE_AVX2_INSTRUCTIONS=OFF,"
+  echo "                 OQS_USE_AVX512_INSTRUCTIONS=OFF"
+else
+  echo "                 kyber_{512,768,1024}_aarch64=OFF"
+fi
+echo ""
+
 echo "── Benchmark Configuration ──────────────────"
 echo ""
 echo "Type           : PURE stock implementation benchmark"
@@ -117,7 +136,8 @@ echo ""
 echo "liboqs version : $(cat "$(dirname "$OUT")/../liboqs/.CMake/oqs-config.cmake" 2>/dev/null | grep version | head -1 || echo 'unknown')"
 echo "liboqs commit  : $(cd "$(dirname "$OUT")/../liboqs" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo 'unknown')"
 echo "Compiled with  : gcc -O3 -I <liboqs/build/include>"
-echo "Linked against : liboqs.a (static), libcrypto (OpenSSL)"
+echo "liboqs built   : gcc -O3 -march=native (DIST_BUILD=OFF, OpenSSL=OFF)"
+echo "Linked against : liboqs.a (static), libcrypto (OpenSSL), libm"
 echo ""
 
 echo "=============================================="
