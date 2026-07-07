@@ -67,6 +67,39 @@ static Stats compute_stats(uint64_t *s, int n) {
     return r;
 }
 
+/* Per-iteration raw sample dump: when PQC_RAW_DIR is set, every timed
+ * sample is appended to $PQC_RAW_DIR/<PQC_RAW_TAG|pure>_raw.csv (one row
+ * per iteration) before compute_stats() sorts the array. */
+static FILE *g_raw;
+
+static void raw_init(void) {
+    const char *dir = getenv("PQC_RAW_DIR");
+    if (!dir || !*dir) return;
+    const char *tag = getenv("PQC_RAW_TAG");
+    if (!tag || !*tag) tag = "pure";
+    char path[768];
+    snprintf(path, sizeof(path), "%s/%s_raw.csv", dir, tag);
+    FILE *probe = fopen(path, "r");
+    int fresh = (probe == NULL);
+    if (probe) fclose(probe);
+    g_raw = fopen(path, "a");
+    if (!g_raw) { perror(path); return; }
+    if (fresh)
+        fprintf(g_raw, "backend,algorithm,operation,iteration,sample,unit\n");
+    printf("Raw samples: %s (per-iteration)\n", path);
+}
+
+static void raw_dump(const char *algo, const char *op,
+                     const uint64_t *samples, int n) {
+    if (!g_raw) return;
+    for (int i = 0; i < n; i++)
+        fprintf(g_raw, "liboqs-stock,%s,%s,%d,%" PRIu64 ",ns\n",
+                algo, op, i + 1, samples[i]);
+    fflush(g_raw);
+}
+
+static void raw_close(void) { if (g_raw) { fclose(g_raw); g_raw = NULL; } }
+
 static FILE *g_csv;
 
 static void csv_header(void) {
@@ -149,18 +182,21 @@ static void bench_kem(const char *alg_name, int iters, int warmup) {
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_KEM_keypair(kem, pk, sk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "keygen", ts, iters);
     csv_row(alg_name, "KEM", "keygen", correct, compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
     OQS_KEM_keypair(kem, pk, sk);
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_KEM_encaps(kem, ct, ss1, pk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "encaps", ts, iters);
     csv_row(alg_name, "KEM", "encaps", correct, compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
     OQS_KEM_encaps(kem, ct, ss1, pk);
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_KEM_decaps(kem, ss2, ct, sk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "decaps", ts, iters);
     csv_row(alg_name, "KEM", "decaps", correct, compute_stats(ts, iters), pk_b, sk_b, ct_b, ss_b, nist);
 
 cleanup:
@@ -217,18 +253,21 @@ static void bench_sig(const char *alg_name, int iters, int warmup) {
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_SIG_keypair(sig, pk, sk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "keygen", ts, iters);
     csv_row(alg_name, "SIG", "keygen", correct, compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
     OQS_SIG_keypair(sig, pk, sk);
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "sign", ts, iters);
     csv_row(alg_name, "SIG", "sign", correct, compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
     OQS_SIG_sign(sig, sigbuf, &siglen, msg, MSG_LEN, sk);
     for (int i = 0; i < iters; i++) {
         uint64_t t = now_ns(); OQS_SIG_verify(sig, msg, MSG_LEN, sigbuf, siglen, pk); ts[i] = now_ns() - t;
     }
+    raw_dump(alg_name, "verify", ts, iters);
     csv_row(alg_name, "SIG", "verify", correct, compute_stats(ts, iters), pk_b, sk_b, sg_b, 0, nist);
 
 cleanup:
@@ -256,6 +295,7 @@ int main(int argc, char **argv) {
     g_csv = fopen(csv_path, "w");
     if (!g_csv) { perror(csv_path); return 1; }
     csv_header();
+    raw_init();
 
     printf("=========================================================\n");
     printf(" PQC Pure Implementation Benchmark\n");
@@ -281,6 +321,7 @@ int main(int argc, char **argv) {
     printf("\n");
 
     fclose(g_csv);
+    raw_close();
     OQS_destroy();
 
     printf("=========================================================\n");

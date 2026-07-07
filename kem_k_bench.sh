@@ -25,6 +25,12 @@ REPO="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(pwd)"
 RESULTS_DIR="$ROOT/results"
 mkdir -p "$RESULTS_DIR"
+
+# Per-iteration raw data: every timed sample of every run is appended to
+# results/raw/kem_k_<type>_raw.csv (one row per iteration).
+RAW_DIR="$RESULTS_DIR/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
 ITERS=200
 WARMUP=20
 DEF_K=2
@@ -392,6 +398,19 @@ static int cmp_u64(const void *a, const void *b) {
     uint64_t x=*(const uint64_t*)a, y=*(const uint64_t*)b;
     return (x>y)-(x<y);
 }
+/* Per-iteration raw sample dump: when PQC_RAW_DIR is set, every timed
+ * sample is appended to $PQC_RAW_DIR/kem_k_<type>_raw.csv (one row per
+ * iteration) before compute() sorts the array. */
+static FILE *raw_open(const char *bench_type) {
+    const char *dir = getenv("PQC_RAW_DIR");
+    if (!dir || !*dir) return NULL;
+    char path[768];
+    snprintf(path,sizeof(path),"%s/kem_k_%s_raw.csv",dir,bench_type);
+    FILE *probe=fopen(path,"r"); int fresh=(probe==NULL); if(probe) fclose(probe);
+    FILE *f=fopen(path,"a");
+    if(f && fresh) fprintf(f,"backend,algorithm,operation,iteration,sample,unit\n");
+    return f;
+}
 typedef struct { uint64_t mean,median,mn,mx,sd,p95,p99; double ops; int n; } Stats;
 static Stats compute(uint64_t *s, int n) {
     Stats r={0}; r.n=n;
@@ -464,6 +483,7 @@ int main(int argc, char **argv) {
     }
 
     FILE *fp=csv?fopen(csv,"a"):NULL;
+    FILE *raw=raw_open(bench_type);
     const char *ops[]={"keygen","encaps","decaps"};
     for(int op=0;op<3;op++){
         long rss_b=rss_kb(); double rapl_b=rapl_uj();
@@ -477,6 +497,11 @@ int main(int argc, char **argv) {
             for(int i=0;i<iters;i++){uint64_t t=now_ns();${PREFIX}_crypto_kem_dec(ss2,ct,sk);ts[i]=now_ns()-t;}
         }
         Probe pr=probe_finish(rss_b,rapl_b,iters);
+        if(raw){
+            for(int i=0;i<iters;i++)
+                fprintf(raw,"%s,%s,%s,%d,%"PRIu64",ns\n",backend,algo,ops[op],i+1,ts[i]);
+            fflush(raw);
+        }
         Stats st=compute(ts,iters);
         printf("    %-8s  median=%"PRIu64"ns  ops/s=%.1f\n",ops[op],st.median,st.ops);
         if(fp){
@@ -499,6 +524,7 @@ int main(int argc, char **argv) {
         }
     }
     if(fp) fclose(fp);
+    if(raw) fclose(raw);
     free(ts);
     return 0;
 }

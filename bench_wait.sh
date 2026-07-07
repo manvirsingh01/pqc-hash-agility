@@ -156,6 +156,13 @@ fi
 export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
 export BENCH_LAUNCHER="$LAUNCHER"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/wait_system_info.txt"
+
+# Per-iteration raw data: every timed sample of every backend run is
+# appended to results/raw/wait_raw.csv (one row per iteration).
+RAW_DIR="$RESULTS_DIR/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
+export PQC_RAW_TAG="wait"
 echo ""
 
 # ── Combined CSV header (derived from the first run, never hardcoded) ──

@@ -89,6 +89,12 @@ fi
 export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
 export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
+
+# Per-iteration raw data: every timed sample of every backend run is
+# appended to results/raw/<tag>_raw.csv (one row per iteration).
+RAW_DIR="$RESULTS_DIR/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
 echo ""
 
 # ── Optional: pin CPU to performance governor (reduces timing jitter) ──
@@ -132,6 +138,12 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
       echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     fi
     echo ""
+
+    if [ "$ROUNDS" -gt 1 ]; then
+      export PQC_RAW_TAG="custom_round${ROUND}"
+    else
+      export PQC_RAW_TAG="custom"
+    fi
 
     rm -f pqc_benchmark_results.csv
 
@@ -218,6 +230,7 @@ if [ "$CUSTOM_ONLY" = "0" ]; then
     echo ""
   fi
 
+  export PQC_RAW_TAG="library_default"
   $LAUNCHER ./liboqs_bench \
     --iters  "$LITERS" \
     --warmup "$WARMUP" \

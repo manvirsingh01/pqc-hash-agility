@@ -391,6 +391,7 @@ static void reduce_measurement_noise(void) {
  * ========================================================================= */
 #ifdef USE_SHAKE
 #  define HASH_BACKEND_TAG    "SHAKE (FIPS 202, n_r=24, FIPS-COMPLIANT)"
+#  define HASH_BACKEND_SHORT  "shake"
 #  define HASH_ROUNDS         24
 #  define FIPS_COMPLIANT      1
 #  define KEM_VECTOR1_LABEL   "SHAKE128 (n_r=24)"
@@ -398,6 +399,7 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR4_LABEL   "SHAKE256 (n_r=24)"
 #elif defined(USE_TURBOSHAKE)
 #  define HASH_BACKEND_TAG    "TurboSHAKE (RFC 9861, n_r=12, NON-FIPS)"
+#  define HASH_BACKEND_SHORT  "turboshake"
 #  define HASH_ROUNDS         12
 #  define FIPS_COMPLIANT      0
 #  define KEM_VECTOR1_LABEL   "TurboSHAKE128 (n_r=12, D=0x1F)"
@@ -405,6 +407,7 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR4_LABEL   "TurboSHAKE256 (n_r=12, D=0x3F)"
 #elif defined(USE_K12)
 #  define HASH_BACKEND_TAG    "KangarooTwelve (RFC 9861, n_r=12 tree hash, NON-FIPS)"
+#  define HASH_BACKEND_SHORT  "k12"
 #  define HASH_ROUNDS         12
 #  define FIPS_COMPLIANT      0
 #  define KEM_VECTOR1_LABEL   "KT128 (n_r=12, C=0x1F)"
@@ -412,6 +415,7 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR4_LABEL   "KT256 (n_r=12, C=0x3F)"
 #elif defined(USE_BLAKE3)
 #  define HASH_BACKEND_TAG    "BLAKE3 (native XOF, 7 rounds, NON-FIPS)"
+#  define HASH_BACKEND_SHORT  "blake3"
 #  define HASH_ROUNDS         7
 #  define FIPS_COMPLIANT      0
 #  define KEM_VECTOR1_LABEL   "BLAKE3-XOF (D=0x1F)"
@@ -419,6 +423,7 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR4_LABEL   "BLAKE3-XOF (D=0x3F)"
 #elif defined(USE_XOODYAK)
 #  define HASH_BACKEND_TAG    "Xoodyak (Cyclist/Xoodoo, 12 rounds, NON-FIPS)"
+#  define HASH_BACKEND_SHORT  "xoodyak"
 #  define HASH_ROUNDS         12
 #  define FIPS_COMPLIANT      0
 #  define KEM_VECTOR1_LABEL   "Xoodyak-Hash (D=0x1F)"
@@ -426,6 +431,7 @@ static void reduce_measurement_noise(void) {
 #  define KEM_VECTOR4_LABEL   "Xoodyak-Hash (D=0x3F)"
 #elif defined(USE_HARAKA)
 #  define HASH_BACKEND_TAG    "Haraka-CTR (Haraka512, 5 rounds, non-standard, NON-FIPS)"
+#  define HASH_BACKEND_SHORT  "haraka"
 #  define HASH_ROUNDS         5
 #  define FIPS_COMPLIANT      0
 #  define KEM_VECTOR1_LABEL   "Haraka-CTR (D=0x1F)"
@@ -436,6 +442,7 @@ static void reduce_measurement_noise(void) {
  * same FIPS 202 SHAKE). Kept as an independent "production reference"
  * series -- NOT the hash-substitution baseline, which is USE_SHAKE. */
 #  define HASH_BACKEND_TAG    "SHAKE-liboqs (FIPS 202, n_r=24, production reference)"
+#  define HASH_BACKEND_SHORT  "liboqs-ref"
 #  define HASH_ROUNDS         24
 #  define FIPS_COMPLIANT      1
 #  define KEM_VECTOR1_LABEL   "SHAKE128 (n_r=24, liboqs)"
@@ -581,6 +588,54 @@ static inline uint64_t wallclock_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* =========================================================================
+ * PER-ITERATION RAW SAMPLE DUMP
+ * When the PQC_RAW_DIR environment variable is set, every post-warmup
+ * timed sample is appended to $PQC_RAW_DIR/<PQC_RAW_TAG|pqc_bench>_raw.csv,
+ * one row per iteration, so the full distribution behind each aggregate
+ * CSV row can be re-analysed offline.  Samples are the same values fed to
+ * compute_stats(): counter deltas with the median harness overhead already
+ * subtracted.  Disabled (zero cost) when PQC_RAW_DIR is unset.
+ * ========================================================================= */
+#if defined(__aarch64__)
+#  define RAW_SAMPLE_UNIT "cntvct_ticks"
+#else
+#  define RAW_SAMPLE_UNIT "rdtsc_cycles"
+#endif
+
+static FILE *g_raw_fp = NULL;
+
+static void raw_dump_init(void) {
+    const char *dir = getenv("PQC_RAW_DIR");
+    if (!dir || !*dir) return;
+    const char *tag = getenv("PQC_RAW_TAG");
+    if (!tag || !*tag) tag = "pqc_bench";
+    char path[768];
+    snprintf(path, sizeof(path), "%s/%s_raw.csv", dir, tag);
+    FILE *probe = fopen(path, "r");
+    int fresh = (probe == NULL);
+    if (probe) fclose(probe);
+    g_raw_fp = fopen(path, "a");
+    if (!g_raw_fp) { perror(path); return; }
+    if (fresh)
+        fprintf(g_raw_fp, "backend,algorithm,operation,iteration,sample,unit\n");
+    printf("  Raw samples      : %s (per-iteration)\n", path);
+}
+
+static void raw_dump_samples(const char *algo, const char *op,
+                             const uint64_t *samples, uint64_t n) {
+    if (!g_raw_fp) return;
+    for (uint64_t i = 0; i < n; i++)
+        fprintf(g_raw_fp, "%s,%s,%s,%" PRIu64 ",%" PRIu64 ",%s\n",
+                HASH_BACKEND_SHORT, algo, op, i + 1, samples[i],
+                RAW_SAMPLE_UNIT);
+    fflush(g_raw_fp);
+}
+
+static void raw_dump_close(void) {
+    if (g_raw_fp) { fclose(g_raw_fp); g_raw_fp = NULL; }
 }
 
 /* =========================================================================
@@ -1459,6 +1514,8 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   BENCH_ITERATIONS,
                   kem->length_public_key + kem->length_secret_key,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "keygen",
+                     cycles_kg + BENCH_WARMUP, BENCH_ITERATIONS);
 
     /* TIER 11/12: memory footprint + energy proxy.
      * Run 3 warmup calls before the probe to exclude first-time library init. */
@@ -1505,6 +1562,8 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   BENCH_ITERATIONS,
                   kem->length_ciphertext + kem->length_shared_secret,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "encaps",
+                     cycles_enc + BENCH_WARMUP, BENCH_ITERATIONS);
 
     for (int mw = 0; mw < 3; mw++) OQS_KEM_encaps(kem, ct, ss, pk);
     {
@@ -1549,6 +1608,8 @@ static kem_bench_result_t bench_kem_obj(OQS_KEM *kem,
                   BENCH_ITERATIONS,
                   kem->length_ciphertext + kem->length_shared_secret,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "decaps",
+                     cycles_dec + BENCH_WARMUP, BENCH_ITERATIONS);
 
     for (int mw = 0; mw < 3; mw++) OQS_KEM_decaps(kem, ss, ct, sk);
     {
@@ -1783,6 +1844,8 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   BENCH_ITERATIONS,
                   sig->length_public_key + sig->length_secret_key,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "keygen",
+                     cycles_kg + BENCH_WARMUP, BENCH_ITERATIONS);
 
     for (int mw = 0; mw < 3; mw++) OQS_SIG_keypair(sig, pk, sk);
     {
@@ -1834,6 +1897,8 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   BENCH_ITERATIONS,
                   sig->length_signature,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "sign",
+                     cycles_sign + BENCH_WARMUP, BENCH_ITERATIONS);
 
     for (int mw = 0; mw < 3; mw++) OQS_SIG_sign(sig, signature, &sig_len, msg, BENCH_MSG_LEN, sk);
     {
@@ -1881,6 +1946,8 @@ static sig_bench_result_t bench_sig_obj(OQS_SIG *sig,
                   BENCH_ITERATIONS,
                   sig->length_signature,
                   (double)(wall_end - wall_start));
+    raw_dump_samples(display_name, "verify",
+                     cycles_ver + BENCH_WARMUP, BENCH_ITERATIONS);
 
     for (int mw = 0; mw < 3; mw++) OQS_SIG_verify(sig, msg, BENCH_MSG_LEN, signature, sig_len, pk);
     {
@@ -2498,6 +2565,7 @@ int main(int argc, char *argv[]) {
 
     /* Open CSV output. */
     csv_open(csv_append);
+    raw_dump_init();
 
     /* ================================================================
      * BENCHMARK ML-KEM PARAMETER SETS
@@ -2760,6 +2828,7 @@ int main(int argc, char *argv[]) {
     print_comparison_guide();
 
     csv_close();
+    raw_dump_close();
     printf("\n  CSV results written to: %s\n", BENCH_CSV_OUTPUT);
     printf("  Benchmark complete.\n\n");
 

@@ -77,6 +77,13 @@ fi
 export BENCH_CFLAGS="-O3 (pure_bench.c against stock liboqs, built with -O3 -march=native)"
 export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/pure_system_info.sh" "$RESULTS_DIR/pure_system_info.txt"
+
+# Per-iteration raw data: every timed sample is appended to
+# results/raw/pure_raw.csv (one row per iteration).
+RAW_DIR="$ROOT/results/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
+export PQC_RAW_TAG="pure"
 echo ""
 
 # ── Build pure_bench if not present ──

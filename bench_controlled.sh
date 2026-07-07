@@ -121,6 +121,12 @@ export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -mss
 export BENCH_LAUNCHER="$LAUNCHER"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
+# Per-iteration raw data: every timed sample of every backend run is
+# appended to results/raw/controlled_roundN_raw.csv (one row per iteration).
+RAW_DIR="$ROOT/results/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
+
 # ── Detect available benchmarks ──
 # bench_shake..bench_haraka are the PQClean-fork hash-substitution backends
 # (bench_shake = SHAKE baseline). bench_liboqs is liboqs's own ML-KEM/ML-DSA,
@@ -148,6 +154,8 @@ for ROUND in $(seq 1 "$ROUNDS"); do
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
   echo "  Round $ROUND / $ROUNDS"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  export PQC_RAW_TAG="controlled_round${ROUND}"
 
   ORDER=0
   for BENCH in $BENCHES; do
