@@ -146,7 +146,16 @@ else
 fi
 
 # ── System info ──
+export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="$LAUNCHER"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
+
+# Per-iteration raw data: every timed sample of every backend run is
+# appended to results/raw/shuffled_raw.csv (one row per iteration).
+RAW_DIR="$RESULTS_DIR/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
+export PQC_RAW_TAG="shuffled"
 echo ""
 
 # ── Combined CSV header ──

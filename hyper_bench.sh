@@ -75,8 +75,30 @@ for f in "$OQS_STATIC" "$XKCP_LIB"; do
   [ -f "$f" ] || { echo "ERROR: $f not found. Run setup.sh first."; exit 1; }
 done
 
+# ── Real-time launcher (noise reduction) ──
+# SCHED_FIFO stops other tasks preempting the benchmark mid-measurement,
+# the main source of high-percentile outliers. Falls back to nice -20.
+LAUNCHER=""
+if chrt -f 99 true 2>/dev/null; then
+  LAUNCHER="chrt -f 99"
+  echo "[noise] Real-time priority: SCHED_FIFO 99 (via chrt)"
+elif nice -n -20 true 2>/dev/null; then
+  LAUNCHER="nice -n -20"
+  echo "[noise] Priority: nice -20 (chrt unavailable)"
+else
+  echo "[noise] Default priority (run as root for SCHED_FIFO)"
+fi
+
 # ── Generate system info ──
+export BENCH_CFLAGS="-O3 -march=native -Wall (+ backend includes; BLAKE3 SIMD disabled; haraka: -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
+
+# Per-iteration raw data: every timed sample of every run is appended to
+# results/raw/hyper_{kem,dsa}_<type>_raw.csv (one row per iteration).
+RAW_DIR="$RESULTS_DIR/raw"
+mkdir -p "$RAW_DIR"
+export PQC_RAW_DIR="$RAW_DIR"
 
 # ── Backend selection ──
 select_backends() {
@@ -341,6 +363,19 @@ static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return (x > y) - (x < y);
 }
+/* Per-iteration raw sample dump: when PQC_RAW_DIR is set, every timed
+ * sample is appended to $PQC_RAW_DIR/<prefix>_<type>_raw.csv (one row
+ * per iteration) before compute() sorts the array. */
+static FILE *raw_open(const char *prefix, const char *bench_type) {
+    const char *dir = getenv("PQC_RAW_DIR");
+    if (!dir || !*dir) return NULL;
+    char path[768];
+    snprintf(path, sizeof(path), "%s/%s_%s_raw.csv", dir, prefix, bench_type);
+    FILE *probe = fopen(path, "r"); int fresh = (probe == NULL); if (probe) fclose(probe);
+    FILE *f = fopen(path, "a");
+    if (f && fresh) fprintf(f, "backend,algorithm,operation,iteration,sample,unit\n");
+    return f;
+}
 typedef struct {
     uint64_t mean, median, mn, mx, sd, p95, p99;
     double ops;
@@ -449,6 +484,7 @@ int main(int argc, char **argv) {
     }
 
     FILE *fp = csv ? fopen(csv, "a") : NULL;
+    FILE *raw = raw_open("hyper_kem", bench_type);
     const char *ops[] = {"keygen", "encaps", "decaps"};
     for (int op = 0; op < 3; op++) {
         long rss_b = rss_kb(); double rapl_b = rapl_uj();
@@ -462,6 +498,11 @@ int main(int argc, char **argv) {
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_kem_dec(ss2, ct, sk); ts[i] = now_ns() - t; }
         }
         Probe pr = probe_finish(rss_b, rapl_b, iters);
+        if (raw) {
+            for (int i = 0; i < iters; i++)
+                fprintf(raw, "%s,%s,%s,%d,%" PRIu64 ",ns\n", backend, algo, ops[op], i + 1, ts[i]);
+            fflush(raw);
+        }
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
@@ -483,6 +524,7 @@ int main(int argc, char **argv) {
         }
     }
     if (fp) fclose(fp);
+    if (raw) fclose(raw);
     free(ts);
     return 0;
 }
@@ -503,7 +545,7 @@ MAINEOF
     else
       CSV_FILE="$CSV_CUSTOM"
     fi
-    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --profile "$PROFILE" --type "$BENCH_TYPE"
+    $LAUNCHER "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --profile "$PROFILE" --type "$BENCH_TYPE"
   }
 
   COMBO=0
@@ -866,6 +908,19 @@ static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
     return (x > y) - (x < y);
 }
+/* Per-iteration raw sample dump: when PQC_RAW_DIR is set, every timed
+ * sample is appended to $PQC_RAW_DIR/<prefix>_<type>_raw.csv (one row
+ * per iteration) before compute() sorts the array. */
+static FILE *raw_open(const char *prefix, const char *bench_type) {
+    const char *dir = getenv("PQC_RAW_DIR");
+    if (!dir || !*dir) return NULL;
+    char path[768];
+    snprintf(path, sizeof(path), "%s/%s_%s_raw.csv", dir, prefix, bench_type);
+    FILE *probe = fopen(path, "r"); int fresh = (probe == NULL); if (probe) fclose(probe);
+    FILE *f = fopen(path, "a");
+    if (f && fresh) fprintf(f, "backend,algorithm,operation,iteration,sample,unit\n");
+    return f;
+}
 typedef struct {
     uint64_t mean, median, mn, mx, sd, p95, p99;
     double ops;
@@ -974,6 +1029,7 @@ int main(int argc, char **argv) {
     }
 
     FILE *fp = csv ? fopen(csv, "a") : NULL;
+    FILE *raw = raw_open("hyper_dsa", bench_type);
     const char *ops[] = {"keygen", "sign", "verify"};
     for (int op = 0; op < 3; op++) {
         long rss_b = rss_kb(); double rapl_b = rapl_uj();
@@ -987,6 +1043,11 @@ int main(int argc, char **argv) {
             for (int i = 0; i < iters; i++) { uint64_t t = now_ns(); ${PREFIX}_crypto_sign_verify(sig, siglen, msg, msglen, pk); ts[i] = now_ns() - t; }
         }
         Probe pr = probe_finish(rss_b, rapl_b, iters);
+        if (raw) {
+            for (int i = 0; i < iters; i++)
+                fprintf(raw, "%s,%s,%s,%d,%" PRIu64 ",ns\n", backend, algo, ops[op], i + 1, ts[i]);
+            fflush(raw);
+        }
         Stats st = compute(ts, iters);
         printf("    %-8s  median=%" PRIu64 "ns  ops/s=%.1f\n", ops[op], st.median, st.ops);
         if (fp) {
@@ -1008,6 +1069,7 @@ int main(int argc, char **argv) {
         }
     }
     if (fp) fclose(fp);
+    if (raw) fclose(raw);
     free(ts);
     return 0;
 }
@@ -1028,7 +1090,7 @@ MAINEOF
     else
       CSV_FILE="$CSV_CUSTOM"
     fi
-    "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --base "$DSA_BASE" --type "$BENCH_TYPE"
+    $LAUNCHER "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --base "$DSA_BASE" --type "$BENCH_TYPE"
   }
 
   COMBO=0
