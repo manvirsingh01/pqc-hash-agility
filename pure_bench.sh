@@ -59,7 +59,23 @@ echo " Output      : results/pure/"
 echo "========================================================="
 echo ""
 
+# ── Real-time launcher (noise reduction) ──
+# SCHED_FIFO stops other tasks preempting the benchmark mid-measurement,
+# the main source of high-percentile outliers. Falls back to nice -20.
+LAUNCHER=""
+if chrt -f 99 true 2>/dev/null; then
+  LAUNCHER="chrt -f 99"
+  echo "[noise] Real-time priority: SCHED_FIFO 99 (via chrt)"
+elif nice -n -20 true 2>/dev/null; then
+  LAUNCHER="nice -n -20"
+  echo "[noise] Priority: nice -20 (chrt unavailable)"
+else
+  echo "[noise] Default priority (run as root for SCHED_FIFO)"
+fi
+
 # ── Generate system info ──
+export BENCH_CFLAGS="-O3 (pure_bench.c against stock liboqs, built with -O3 -march=native)"
+export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/pure_system_info.sh" "$RESULTS_DIR/pure_system_info.txt"
 echo ""
 
@@ -86,7 +102,7 @@ fi
 echo ""
 
 # ── Run benchmark ──
-./pure_bench \
+$LAUNCHER ./pure_bench \
   --iters  "$ITERS" \
   --warmup "$WARMUP" \
   --csv    "$RESULTS_DIR/pure_benchmark.csv"

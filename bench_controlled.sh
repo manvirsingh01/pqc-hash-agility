@@ -115,6 +115,10 @@ else
 fi
 
 # ── Generate system info ──
+# Record the exact compiler flags the bench binaries were built with
+# (setup.sh) and the priority/affinity launcher used for this run.
+export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="$LAUNCHER"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
 # ── Detect available benchmarks ──

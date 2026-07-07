@@ -64,6 +64,13 @@ echo "OS             : $(cat /etc/os-release 2>/dev/null | grep '^PRETTY_NAME' |
 echo "Compiler       : $(gcc --version 2>/dev/null | head -1 || echo 'N/A')"
 echo ""
 
+echo "── Compiler Flags (this benchmark run) ──────"
+echo "Compiler       : $(gcc --version 2>/dev/null | head -1 || echo 'N/A')"
+echo "CFLAGS         : ${BENCH_CFLAGS:-not recorded (caller did not export BENCH_CFLAGS)}"
+echo "Linking        : ${BENCH_LINK:-static liboqs.a + -lcrypto -lm}"
+echo "Launcher       : ${BENCH_LAUNCHER:-none (default priority, no core pinning)}"
+echo ""
+
 echo "── Benchmark Configuration ──────────────────"
 echo ""
 echo "Type           : PURE stock implementation benchmark"

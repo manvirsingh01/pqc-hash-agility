@@ -29,6 +29,7 @@ ITERS=200
 WARMUP=20
 DEF_K=2
 COOLDOWN=60   # seconds of thermal cooldown between k values
+BASE_CFLAGS="-O3 -march=native"
 
 for i in "$@"; do
   case "$i" in
@@ -64,7 +65,23 @@ for f in "$OQS_STATIC" "$XKCP_LIB"; do
   [ -f "$f" ] || { echo "ERROR: $f not found. Run setup.sh first."; exit 1; }
 done
 
+# ── Real-time launcher (noise reduction) ──
+# SCHED_FIFO stops other tasks preempting the benchmark mid-measurement,
+# the main source of high-percentile outliers. Falls back to nice -20.
+LAUNCHER=""
+if chrt -f 99 true 2>/dev/null; then
+  LAUNCHER="chrt -f 99"
+  echo "[noise] Real-time priority: SCHED_FIFO 99 (via chrt)"
+elif nice -n -20 true 2>/dev/null; then
+  LAUNCHER="nice -n -20"
+  echo "[noise] Priority: nice -20 (chrt unavailable)"
+else
+  echo "[noise] Default priority (run as root for SCHED_FIFO)"
+fi
+
 # ── Generate system info ──
+export BENCH_CFLAGS="$BASE_CFLAGS -Wall (+ backend includes; BLAKE3 SIMD disabled; haraka: -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 
 # ── Thermal cooldown with visible countdown ──
@@ -191,8 +208,6 @@ KBUILD="$ROOT/.kem_k_build"
 mkdir -p "$KBUILD"
 
 # ── Compile common objects once ──
-BASE_CFLAGS="-O3 -march=native"
-
 echo ""
 echo "[build] Compiling common objects..."
 COMMON_OBJS="$KBUILD/fips202.o $KBUILD/randombytes.o"
@@ -505,7 +520,7 @@ MAINEOF
   else
     CSV_FILE="$CSV_CUSTOM"
   fi
-  "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --type "$BENCH_TYPE"
+  $LAUNCHER "$BENCH_BIN" --iters "$ITERS" --warmup "$WARMUP" --csv "$RESULTS_DIR/$CSV_FILE" --backend "$BACKEND" --type "$BENCH_TYPE"
 }
 
 COMBO=0

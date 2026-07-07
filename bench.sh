@@ -71,7 +71,23 @@ fi
 echo "========================================================="
 echo ""
 
+# ── Real-time launcher (noise reduction) ──
+# SCHED_FIFO stops other tasks preempting the benchmark mid-measurement,
+# the main source of high-percentile outliers. Falls back to nice -20.
+LAUNCHER=""
+if chrt -f 99 true 2>/dev/null; then
+  LAUNCHER="chrt -f 99"
+  echo "[noise] Real-time priority: SCHED_FIFO 99 (via chrt)"
+elif nice -n -20 true 2>/dev/null; then
+  LAUNCHER="nice -n -20"
+  echo "[noise] Priority: nice -20 (chrt unavailable)"
+else
+  echo "[noise] Default priority (run as root for SCHED_FIFO)"
+fi
+
 # ── Generate system info ──
+export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="${LAUNCHER:-none (default priority)}"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 echo ""
 
@@ -120,34 +136,34 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
     rm -f pqc_benchmark_results.csv
 
     echo "--- [1/6] SHAKE  (FIPS SHAKE/SHA-3, PQClean fork — baseline) ---"
-    ./bench_shake \
+    $LAUNCHER ./bench_shake \
       --iterations "$ITERS" \
       --warmup "$WARMUP"
 
     echo ""
     echo "--- [2/6] TurboSHAKE  (n_r=12, RFC 9861) ---"
-    ./bench_turboshake \
+    $LAUNCHER ./bench_turboshake \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append
 
     echo ""
     echo "--- [3/6] KangarooTwelve  (tree hash, RFC 9861) ---"
-    ./bench_k12 \
+    $LAUNCHER ./bench_k12 \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append
 
     echo ""
     echo "--- [4/6] BLAKE3  (portable XOF, all SIMD disabled) ---"
-    ./bench_blake3 \
+    $LAUNCHER ./bench_blake3 \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append
 
     echo ""
     echo "--- [5/6] Xoodyak  (Xoodoo[12] permutation) ---"
-    ./bench_xoodyak \
+    $LAUNCHER ./bench_xoodyak \
       --iterations "$ITERS" \
       --warmup "$WARMUP" \
       --csv-append
@@ -155,7 +171,7 @@ if [ "$DEFAULT_ONLY" = "0" ]; then
     if [ "$NO_HARAKA" = "0" ]; then
       echo ""
       echo "--- [6/6] Haraka  (AES-NI on x86_64 / NEON on aarch64) ---"
-      ./bench_haraka \
+      $LAUNCHER ./bench_haraka \
         --iterations "$ITERS" \
         --warmup "$WARMUP" \
         --csv-append
@@ -202,7 +218,7 @@ if [ "$CUSTOM_ONLY" = "0" ]; then
     echo ""
   fi
 
-  ./liboqs_bench \
+  $LAUNCHER ./liboqs_bench \
     --iters  "$LITERS" \
     --warmup "$WARMUP" \
     --csv    "$RESULTS_DIR/library_default_benchmark.csv"

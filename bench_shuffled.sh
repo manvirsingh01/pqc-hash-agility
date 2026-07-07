@@ -146,6 +146,8 @@ else
 fi
 
 # ── System info ──
+export BENCH_CFLAGS="-O3 -march=native (setup.sh; haraka backend adds -maes -msse4.1 on x86_64)"
+export BENCH_LAUNCHER="$LAUNCHER"
 bash "$REPO/system_info.sh" "$RESULTS_DIR/system_info.txt"
 echo ""
 
