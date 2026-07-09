@@ -136,7 +136,11 @@ pqc_repo/
 │   │   ├── Makefile           Builds full_bench / liboqs_bench / pure_bench
 │   │   ├── full_bench.c       In-process 7-series sweep (126 rows)
 │   │   ├── liboqs_bench.c     Same sweep through the OQS vtable (126 rows)
-│   │   └── pure_bench.c       Stock-liboqs-only benchmark
+│   │   ├── pure_bench.c       Stock-liboqs-only benchmark
+│   │   ├── pure_backends_bench.c  Pure-style timing of the six backends
+│   │   │                          (compiled 6x with -DUSE_<TAG>)
+│   │   └── file_sign_bench.c  Payload hash + ML-DSA sign/verify per backend
+│   │                          (compiled 6x; ns + cycle counter per round)
 │   └── common/                BLAKE3 + Haraka support sources
 │
 ├── bench.sh                   Sequential run of all 6 custom backends + library CSV
@@ -148,8 +152,12 @@ pqc_repo/
 ├── kem_k_bench.sh             ML-KEM module-rank sweep (k = 1..8)
 ├── hyper_bench.sh             Full hyperparameter explorer (KEM + DSA)
 ├── pure_bench.sh              Stock liboqs benchmark (no forks at all)
+├── pure_backends_bench.sh     Six backends under pure-style (wall-clock) timing
+├── file_sign_bench.sh         Hash + ML-DSA-sign a payload file, all six backends
 ├── system_info.sh             Records hardware/build configuration
 └── results/                   All CSV outputs land here
+    └── raw/                   Per-iteration raw samples (<series>_raw.csv) from
+                               every harness, enabled via PQC_RAW_DIR/PQC_RAW_TAG
 ```
 
 ---
@@ -694,7 +702,15 @@ build can never emit plausible-looking numbers.
 | `bench_wait.sh` | Waits for load-average/temperature to settle before each binary — for noisy shared machines | same schema |
 | `full_bench` (C) | One process, 7 series × 6 algorithms through the adapter constructors directly — no process-launch noise between series | 126-row CSV |
 | `liboqs_bench` (C) | Same sweep driven through the `OQS_KEM`/`OQS_SIG` vtable indirection — measures adapter/vtable overhead vs `full_bench` | 126-row CSV |
+| `pure_backends_bench.sh` | The six backends timed with `pure_bench.sh`'s simple wall-clock methodology (one binary per backend, pre-built libs linked as-is; no flag/hardware changes) | `results/pure_backends/pure_backends_benchmark.csv` (108 rows) |
+| `file_sign_bench.sh` | Hashes and ML-DSA-signs a **payload file** with all six backends; per-round wall-clock ns **and** cycle-counter samples; digest hex codes + signature fingerprints + payload info recorded | `results/file_sign/file_sign_benchmark.csv`, `file_sign_hashes.csv` |
 | `compute_ci.py` | Statistics over any of the above (see §14) | `summary_with_ci.csv`, `effect_sizes.csv` |
+
+Every timing harness also supports **per-iteration raw capture**: with
+`PQC_RAW_DIR` (and optional `PQC_RAW_TAG`) set — the driver scripts set them
+automatically — each post-warmup sample is appended to
+`results/raw/<tag>_raw.csv`, one row per iteration, so the full distribution
+behind every aggregate row can be re-analysed offline.
 
 Typical full experiment:
 
@@ -757,6 +773,23 @@ parameters) rather than the pre-built forks:
   unmodified liboqs ML-KEM/ML-DSA only, no forks, no tweaks
   (`results/pure/pure_benchmark.csv`). If this drifts from `bench_liboqs`,
   something is wrong with the build.
+* **`pure_backends_bench.sh` / `pure_backends_bench.c`** — the six hash
+  backends measured with the pure benchmark's *simple* methodology (plain
+  wall-clock ns, one warmup pass, one timed loop — no cycle counters, no
+  overhead subtraction). One thin binary per backend (`-DUSE_<TAG>`), linked
+  against the pre-built static libs and adapter objects exactly as `setup.sh`
+  built them. Complements the full harness: same comparison, minimal
+  instrumentation (`results/pure_backends/pure_backends_benchmark.csv`).
+* **`file_sign_bench.sh` / `file_sign_bench.c`** — an *application-level*
+  experiment: hash and ML-DSA-sign a user-supplied **payload file** with all
+  six backends. Per backend it (1) hashes the payload with the backend's
+  H/CRH-role construction (domain `0x3F`, 32-byte digest) and records the
+  digest hex, (2) signs with ML-DSA-44/65/87 and verifies (round-trip +
+  tamper), (3) times hash/sign/verify per round with wall-clock ns **and**
+  cycle-counter readings (`rdtsc` / `CNTVCT_EL0`). On large messages the
+  message hash dominates signing, so backend differences are much larger here
+  than in the key-operation benchmarks
+  (`results/file_sign/file_sign_benchmark.csv` + `file_sign_hashes.csv`).
 * **`system_info.sh`** — captures CPU model, frequencies, governor, kernel,
   and compiler versions next to every result set, so CSVs remain
   interpretable later.

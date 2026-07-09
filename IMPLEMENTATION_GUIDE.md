@@ -318,6 +318,8 @@ $ROOT/
 ├── pqc_<tag>_kem.{c,h}                  # §11 (tag = turboshake/k12/blake3/xoodyak/haraka)
 ├── pqc_<tag>_dsa.{c,h}                  # §11
 ├── bench_shake, bench_<tag>             # final binaries
+├── pure_bench, pure_bench_<tag>         # pure-style harness binaries (§15)
+├── file_sign_<tag>                      # payload hash+sign binaries (§15)
 └── pqc_benchmark_results.csv            # benchmark output
 ```
 
@@ -8639,6 +8641,71 @@ Key columns:
 - `energy_proxy_*`, `est_energy_uj*`, `edp_cycle_ns` — cycle-count-derived
   energy/EDP (energy-delay-product) proxies (not calibrated against real
   hardware power sensors unless `energy_calibrated=1`).
+
+### Per-iteration raw data (`PQC_RAW_DIR` / `PQC_RAW_TAG`)
+
+Every timing harness (`pqc_bench.c`, `pure_bench.c`, `pure_backends_bench.c`,
+`file_sign_bench.c`) supports per-iteration raw capture. When the
+`PQC_RAW_DIR` environment variable is set (the driver scripts set it to
+`results/raw` automatically), each post-warmup timed sample is appended to
+`$PQC_RAW_DIR/<PQC_RAW_TAG>_raw.csv`, one row per iteration; the header is
+written only when the file is new, so the six per-backend binaries of a run
+share one file. Raw rows are dumped **before** `compute_stats()` (which
+qsorts the sample array in place), so they preserve chronological order.
+Cost is zero when `PQC_RAW_DIR` is unset.
+
+### Pure-style benchmark of the six backends (`pure_backends_bench.sh`)
+
+`src/bench/pure_backends_bench.c` is `pure_bench.c`'s machinery (plain
+`CLOCK_MONOTONIC` wall-clock ns, one warmup pass, one timed loop, the same
+`compute_stats()`) parameterised per backend: compiled six times with
+`-DUSE_SHAKE` … `-DUSE_HARAKA`, each binary reaching its backend through the
+adapter constructors (`OQS_KEM_ml_kem_*_<tag>_new()` /
+`OQS_SIG_ml_dsa_*_<tag>_new()`). The driver links each binary against the
+**pre-built** artifacts exactly as `setup.sh` produced them — per-backend
+`libml-kem-*_<tag>.a` / `libml-dsa-*_<tag>.a` (SIG tag `turbo` for the
+turboshake fork), `pqc_<tag>_kem.o` / `pqc_<tag>_dsa.o`,
+`fips202_turbo.o` + `randombytes_turbo.o`, the backend's extra lib
+(XKCP / BLAKE3 / Haraka) and `liboqs.a` — no library is rebuilt and no
+compiler flag, algorithm setting or hardware setting is changed; only the
+thin harness translation unit is compiled (`-O3 -march=native`;
+haraka: the setup.sh haraka flags). Output:
+`results/pure_backends/pure_backends_benchmark.csv` (108 rows, schema =
+pure benchmark + leading `backend` column) plus
+`results/raw/pure_backends_raw.csv`.
+
+### Payload file hash + sign (`file_sign_bench.sh`)
+
+`src/bench/file_sign_bench.c` (same six-binary `-DUSE_<TAG>` pattern and
+link recipe as above, DSA side only) takes a payload file and, per backend:
+
+1. **Hash** — computes a 32-byte digest of the payload with the backend's
+   H/CRH-role construction (the same one its `symmetric.h` substitutes into
+   ML-DSA, domain byte `0x3F`): SHAKE256 (baseline, no domain byte),
+   TurboSHAKE256 (capacity 512, `D=0x3F`), KT256 (customization `C=0x3F`),
+   BLAKE3 (domain byte appended), Xoodyak Cyclist hash mode (domain byte
+   appended), Haraka-MD (the fork's Merkle–Damgård construction over
+   `haraka512`, replicated in the harness). Determinism is checked and the
+   digest hex recorded.
+2. **Sign/verify** — ML-DSA-44/65/87 over the full payload via the adapter
+   constructors, with round-trip + tamper correctness checks.
+3. **Timing** — every operation is timed per round with **both** wall-clock
+   ns and a serialized cycle-counter reading (`lfence`+`rdtsc`/`rdtscp` on
+   x86_64, ISB-serialized `CNTVCT_EL0` timer ticks on aarch64 — the same
+   counters as `pqc_bench.c`, unit recorded in a `cycle_unit` column).
+
+Outputs: `results/file_sign/file_sign_benchmark.csv` (42 rows: ns + cycle
+stats, ops/sec, payload MB/s, payload info, rounds),
+`file_sign_hashes.csv` (6 digest rows with full hex + construction
+description, 18 signature rows with size + SHA-256 fingerprint of the
+last-round signature — ML-DSA signing is hedged, so signatures differ per
+round — every row carrying payload name/size/SHA-256 and the verify
+result), `file_sign_system_info.txt` (system info + payload section) and
+`results/raw/file_sign_raw.csv` (per-round `ns` **and** `cycles`).
+The payload SHA-256 in the CSVs is computed with OpenSSL's `SHA256()` as a
+backend-neutral reference identifier. Without `--file`, the driver
+generates (and thereafter reuses) a 1 MiB random sample payload at
+`results/file_sign/sample_payload.bin`.
 
 ---
 
