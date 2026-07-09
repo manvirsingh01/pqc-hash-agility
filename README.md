@@ -67,26 +67,42 @@ bash hyper_bench.sh               # interactive: tweak ML-KEM/ML-DSA params
 bash pure_bench.sh
 # Produces: results/pure/pure_benchmark.csv + results/pure/pure_system_info.txt
 
-# 8. (Optional) Run controlled benchmark with replication for statistical rigor
+# 8. (Optional) Run PURE BACKENDS benchmark (the six hash backends, pure-style timing)
+bash pure_backends_bench.sh
+# Produces: results/pure_backends/pure_backends_benchmark.csv
+#           + results/pure_backends/pure_backends_system_info.txt
+
+# 9. (Optional) Hash + ML-DSA-sign a payload file with all six backends
+bash file_sign_bench.sh --file path/to/payload
+# Produces: results/file_sign/file_sign_benchmark.csv  (ns + cycle-counter stats)
+#           results/file_sign/file_sign_hashes.csv     (digests, signatures, payload info)
+#           results/file_sign/file_sign_system_info.txt
+
+# 10. (Optional) Run controlled benchmark with replication for statistical rigor
 sudo bash bench_controlled.sh     # 10 rounds, CPU pinned, turbo off
 python3 compute_ci.py --shuffled results/controlled_benchmark.csv
 # Produces: results/controlled_benchmark.csv (single file, all rounds)
 #           results/replications/roundN_*.csv (per-round files)
 #           results/summary_with_ci.csv + results/effect_sizes.csv
 
-# 9. (Optional) Shuffled benchmark — randomised backend order each round
+# 11. (Optional) Shuffled benchmark — randomised backend order each round
 sudo bash bench_shuffled.sh       # 10 rounds, shuffled order, single CSV
 python3 compute_ci.py --shuffled results/shuffled_benchmark.csv
 # Produces: results/shuffled_benchmark.csv (one file, all rounds + run_order)
 
-# 10. (Optional) Wait-time benchmark — CPU idles before every backend run
+# 12. (Optional) Wait-time benchmark — CPU idles before every backend run
 sudo bash bench_wait.sh           # 5 rounds, 15s settle wait before each run
 python3 compute_ci.py --shuffled results/wait_benchmark.csv
 # Produces: results/wait_benchmark.csv + results/wait_system_info.txt
 
-# 11. (Optional) Run correctness-only tests (no timing)
+# 13. (Optional) Run correctness-only tests (no timing)
 ./bench_shake --correctness-only --trials 1000
 ```
+
+Every timing harness additionally appends one row **per iteration** to
+`results/raw/<series>_raw.csv` (e.g. `pure_raw.csv`, `pure_backends_raw.csv`,
+`file_sign_raw.csv`), so the full sample distribution behind every aggregate
+CSV row can be re-analysed offline.
 
 ---
 
@@ -114,7 +130,9 @@ pqc-hash-agility/
 ├── kem_k_bench.sh            # interactive variable-k ML-KEM benchmark
 ├── hyper_bench.sh            # interactive hyperparameter benchmark (KEM + DSA)
 ├── pure_bench.sh             # benchmark stock liboqs (no custom backends)
-├── pure_system_info.sh       # system info for the pure benchmark
+├── pure_backends_bench.sh    # pure-style benchmark of the six hash backends
+├── file_sign_bench.sh        # hash + ML-DSA-sign a payload file, all six backends
+├── pure_system_info.sh       # system info for the pure/pure-backends/file-sign benchmarks
 ├── bench_controlled.sh       # controlled runner: CPU pinning, replication, CI
 ├── bench_shuffled.sh         # shuffled-order runner: randomised backend order per round
 ├── bench_wait.sh             # wait-time runner: idle wait before every backend run
@@ -142,6 +160,8 @@ pqc-hash-agility/
 │       ├── full_bench.c      # single binary: all backends, correctness + timing
 │       ├── liboqs_bench.c    # all 6 backends via OQS adapter API
 │       ├── pure_bench.c      # stock liboqs only, no custom backends
+│       ├── pure_backends_bench.c  # pure-style timing of the 6 backends (compiled 6x)
+│       ├── file_sign_bench.c # payload hash + ML-DSA sign/verify (compiled 6x)
 │       └── Makefile
 ├── PQClean_custom/           # forked ML-KEM/ML-DSA backend implementations
 │   ├── crypto_kem/
@@ -168,6 +188,15 @@ pqc-hash-agility/
 │   ├── pure/                     # (from pure_bench.sh) stock liboqs benchmark
 │   │   ├── pure_benchmark.csv
 │   │   └── pure_system_info.txt
+│   ├── pure_backends/            # (from pure_backends_bench.sh) six backends, pure-style
+│   │   ├── pure_backends_benchmark.csv
+│   │   └── pure_backends_system_info.txt
+│   ├── file_sign/                # (from file_sign_bench.sh) payload hash + sign
+│   │   ├── file_sign_benchmark.csv
+│   │   ├── file_sign_hashes.csv
+│   │   └── file_sign_system_info.txt
+│   ├── raw/                      # per-iteration raw samples from every harness
+│   │   └── <series>_raw.csv      # pure / pure_backends / file_sign / pqc_bench …
 │   └── reference_aarch64.csv  # reference run on ARM (Kali Linux, aarch64)
 └── IMPLEMENTATION_GUIDE.md    # full code walkthrough and design rationale
 ```
@@ -329,6 +358,79 @@ nist_level
 ```
 
 Use this to compare against the custom-backend results in `custom_benchmark.csv` — the pure benchmark shows what SHAKE performance looks like without any modifications, while the custom benchmark shows the effect of hash-backend substitution.
+
+---
+
+### pure_backends_bench.sh — Pure-Style Benchmark of the Six Hash Backends
+
+The six hash backends (shake baseline, turboshake, k12, blake3, xoodyak, haraka) inside ML-KEM and ML-DSA, measured with the **same simple raw wall-clock methodology as `pure_bench.sh`**: plain `CLOCK_MONOTONIC` ns, one warmup pass, one timed loop. No cycle counters, no overhead subtraction, no memory locking. Nothing about the algorithms, the compiler flags of the already-built backend libraries, or the hardware settings is changed — the pre-built static libs and adapter objects from `setup.sh` are linked exactly as they are; only the thin harness (`src/bench/pure_backends_bench.c`) is compiled, once per backend with `-DUSE_<TAG>`.
+
+```bash
+bash pure_backends_bench.sh                    # default: 200 iterations, 20 warmup
+bash pure_backends_bench.sh --iters 500 --warmup 50
+```
+
+Output in `results/pure_backends/`:
+- `pure_backends_benchmark.csv` — 108 rows (6 backends x 6 algorithms x 3 operations)
+- `pure_backends_system_info.txt` — system info + compiler-flag record
+
+Plus per-iteration raw samples in `results/raw/pure_backends_raw.csv`. Each backend x algorithm gets a correctness self-test (round-trip + tamper detection) before timing.
+
+#### CSV columns (`results/pure_backends/pure_backends_benchmark.csv`)
+
+```
+backend, algorithm, type, operation, correctness, iterations,
+mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns,
+ops_per_sec, pk_bytes, sk_bytes, ct_or_sig_bytes, ss_bytes,
+nist_level
+```
+
+Same schema as the pure benchmark with a leading `backend` column — so the six backends can be compared directly against `results/pure/pure_benchmark.csv` under identical timing methodology.
+
+---
+
+### file_sign_bench.sh — Payload File Hash + Sign Benchmark
+
+Takes a **user-supplied payload file** and, for each of the six hash backends:
+
+1. **Hashes the payload** with the backend's hash function — the exact H/CRH-role construction the backend substitutes into ML-DSA (domain byte `0x3F`, 32-byte digest): SHAKE256, TurboSHAKE256, KT256, BLAKE3, Xoodyak (Cyclist hash mode), Haraka-MD — and records the digest hex code.
+2. **Signs the payload** with ML-DSA-44/65/87 built on that backend and verifies the signatures (round-trip + tamper detection).
+3. **Benchmarks** every operation (hash, sign, verify) over N rounds, recording **both wall-clock ns and a cycle-counter reading per round** (`rdtsc` on x86_64, `CNTVCT_EL0` timer ticks on aarch64 — same counters as the main harness's raw CSVs).
+
+As with the pure-style benchmarks, no algorithm settings, compiler flags, or hardware settings are changed — pre-built libs are linked as-is.
+
+```bash
+bash file_sign_bench.sh --file path/to/payload          # 200 rounds, 20 warmup
+bash file_sign_bench.sh --file doc.pdf --iters 500 --warmup 50
+bash file_sign_bench.sh                                 # no --file: generates/reuses a
+                                                        # 1 MiB random sample payload
+```
+
+Output in `results/file_sign/`:
+- `file_sign_benchmark.csv` — 42 rows (6 backends x [1 hash + 3 ML-DSA variants x sign/verify]) with ns stats, cycle stats, payload throughput and payload info
+- `file_sign_hashes.csv` — hash + signature detail: the 6 payload digests (full hex) with construction descriptions, and 18 signature records (size + SHA-256 fingerprint), each row carrying the payload name/size/SHA-256, round count and verification result
+- `file_sign_system_info.txt` — system info + a payload section (file, size, SHA-256, rounds)
+
+Plus per-round raw samples in `results/raw/file_sign_raw.csv` (`ns` **and** `cycles` per row).
+
+#### CSV columns (`results/file_sign/file_sign_benchmark.csv`)
+
+```
+backend, algorithm, operation, payload_file, payload_bytes, correctness,
+rounds, mean_ns, median_ns, min_ns, max_ns, stddev_ns, p95_ns, p99_ns,
+ops_per_sec, mean_cycles, median_cycles, cycle_unit, payload_mb_per_sec,
+out_bytes, nist_level
+```
+
+#### CSV columns (`results/file_sign/file_sign_hashes.csv`)
+
+```
+backend, record, algorithm, construction, payload_file, payload_bytes,
+payload_sha256, rounds, output_bytes, output_hex, verify
+```
+
+- `record`: `hash` (payload digest; `output_hex` is the full 32-byte digest) or `signature` (`output_hex` is the SHA-256 fingerprint of the last-round signature — ML-DSA signing is hedged/randomized, so signatures differ between rounds)
+- `payload_sha256`: reference SHA-256 of the payload, identical on every row of a run
 
 ---
 
